@@ -21,6 +21,7 @@ const (
 	StreamEventResult    StreamEventKind = "result"
 	StreamEventError     StreamEventKind = "error"
 	StreamEventRestarted StreamEventKind = "restarted"
+	StreamEventSystem    StreamEventKind = "system"
 )
 
 type StreamSlotPhase string
@@ -35,6 +36,7 @@ const (
 type StreamEvent struct {
 	Seq       int             `json:"seq"`
 	Type      StreamEventKind `json:"type"`
+	Subtype   string          `json:"subtype,omitempty"`
 	Timestamp time.Time       `json:"timestamp,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	Step      string          `json:"step,omitempty"`
@@ -185,6 +187,58 @@ func MapStreamEvent(event StreamEvent) StreamStateMapping {
 			TaskEvent:       core.EventUpdated,
 			TaskEventDetail: detail,
 		}
+	case StreamEventSystem:
+		subtype := strings.ToLower(strings.TrimSpace(event.Subtype))
+		switch subtype {
+		case "init":
+			if detail == "" {
+				detail = "stream-json: Claude 会话初始化完成"
+			}
+			return StreamStateMapping{
+				RepoSlotPhase:   StreamSlotPhaseRunning,
+				RepoSlotStep:    "execute",
+				TaskState:       core.StateRunning,
+				TaskEvent:       core.EventStarted,
+				TaskEventDetail: detail,
+			}
+		case "hook_started":
+			if detail == "" {
+				detail = "stream-json: Claude hook 开始执行"
+			}
+			return StreamStateMapping{
+				RepoSlotPhase:   StreamSlotPhaseRunning,
+				RepoSlotStep:    step,
+				TaskState:       core.StateRunning,
+				TaskEvent:       core.EventUpdated,
+				TaskEventDetail: detail,
+			}
+		case "hook_response":
+			if detail == "" {
+				detail = "stream-json: Claude hook 已响应"
+			}
+			return StreamStateMapping{
+				RepoSlotPhase:   StreamSlotPhaseRunning,
+				RepoSlotStep:    step,
+				TaskState:       core.StateRunning,
+				TaskEvent:       core.EventUpdated,
+				TaskEventDetail: detail,
+			}
+		default:
+			if detail == "" {
+				if subtype == "" {
+					detail = "stream-json: 未知系统事件"
+				} else {
+					detail = fmt.Sprintf("stream-json: 未知系统事件 %s", subtype)
+				}
+			}
+			return StreamStateMapping{
+				RepoSlotPhase:   StreamSlotPhaseRunning,
+				RepoSlotStep:    step,
+				TaskState:       core.StateRunning,
+				TaskEvent:       core.EventWarning,
+				TaskEventDetail: detail,
+			}
+		}
 	default:
 		return StreamStateMapping{}
 	}
@@ -262,6 +316,7 @@ func parseStreamLine(lineNo int, raw []byte) (StreamEvent, error) {
 	return StreamEvent{
 		Seq:       lineNo,
 		Type:      kind,
+		Subtype:   subtype,
 		Timestamp: timestamp,
 		SessionID: readStringField(payload, "session_id"),
 		Step:      readStringField(payload, "step", "current_step"),
@@ -275,17 +330,25 @@ func parseStreamLine(lineNo int, raw []byte) (StreamEvent, error) {
 }
 
 func resolveStreamEventKind(payload map[string]json.RawMessage) (StreamEventKind, error) {
-	if kind := normalizeEventKind(readStringField(payload, "event")); kind != "" {
+	rawEvent := strings.ToLower(strings.TrimSpace(readStringField(payload, "event")))
+	if rawEvent == "system" {
+		return StreamEventSystem, nil
+	}
+	if kind := normalizeEventKind(rawEvent); kind != "" {
 		return kind, nil
 	}
 	subtype := strings.ToLower(strings.TrimSpace(readStringField(payload, "subtype")))
+	rawType := strings.ToLower(strings.TrimSpace(readStringField(payload, "type")))
+	if rawType == "system" {
+		return StreamEventSystem, nil
+	}
 	if readBoolField(payload, "is_error") || strings.HasPrefix(subtype, "error") {
 		return StreamEventError, nil
 	}
 	if strings.Contains(subtype, "restart") {
 		return StreamEventRestarted, nil
 	}
-	if kind := normalizeEventKind(readStringField(payload, "type")); kind != "" {
+	if kind := normalizeEventKind(rawType); kind != "" {
 		return kind, nil
 	}
 	if hasUsageField(payload) {
@@ -352,13 +415,22 @@ func applyStreamEvent(snapshot *StreamEventSnapshot, event StreamEvent) {
 		snapshot.RestartCount++
 	}
 	mapping := MapStreamEvent(event)
-	if mapping.RepoSlotPhase != "" {
+	overrideMapping := mapping.RepoSlotPhase != "" && shouldOverrideStreamMapping(snapshot, event)
+	if overrideMapping {
 		snapshot.Mapping = mapping
 	}
-	if step := strings.TrimSpace(mapping.RepoSlotStep); step != "" {
-		snapshot.CurrentStep = step
-	} else if step := strings.TrimSpace(event.Step); step != "" {
-		snapshot.CurrentStep = step
+	if overrideMapping {
+		if step := strings.TrimSpace(mapping.RepoSlotStep); step != "" {
+			snapshot.CurrentStep = step
+		} else if step := strings.TrimSpace(event.Step); step != "" {
+			snapshot.CurrentStep = step
+		}
+	} else if !streamSnapshotHasError(snapshot) && !streamSnapshotHasResult(snapshot) {
+		if step := strings.TrimSpace(mapping.RepoSlotStep); step != "" {
+			snapshot.CurrentStep = step
+		} else if step := strings.TrimSpace(event.Step); step != "" {
+			snapshot.CurrentStep = step
+		}
 	}
 }
 
@@ -378,6 +450,36 @@ func mergeUsage(dst *core.TokenUsage, src core.TokenUsage) {
 	if src.CacheReadInputTokens > 0 {
 		dst.CacheReadInputTokens = src.CacheReadInputTokens
 	}
+}
+
+func shouldOverrideStreamMapping(snapshot *StreamEventSnapshot, event StreamEvent) bool {
+	if snapshot == nil {
+		return true
+	}
+	switch event.Type {
+	case StreamEventError:
+		return true
+	case StreamEventResult:
+		return !streamSnapshotHasError(snapshot)
+	default:
+		if streamSnapshotHasError(snapshot) || streamSnapshotHasResult(snapshot) {
+			return false
+		}
+		return true
+	}
+}
+
+func streamSnapshotHasResult(snapshot *StreamEventSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	if strings.TrimSpace(snapshot.Result) != "" {
+		return true
+	}
+	if snapshot.Mapping.TaskState == core.StateFinalizing {
+		return true
+	}
+	return snapshot.LastEvent == StreamEventResult
 }
 
 func normalizeStep(value, fallback string) string {

@@ -1,0 +1,19 @@
+{
+  "schema_version": "stream_event_contract/v1",
+  "task_id": "system_success",
+  "session_id": "sess-75",
+  "event_count": 5,
+  "started_at": "2026-03-15T15:00:00Z",
+  "updated_at": "2026-03-15T15:00:04Z",
+  "last_event": "system",
+  "current_step": "sync_target",
+  "result": "任务已完成，已修复 stream 契约",
+  "cost_usd": 0.21,
+  "mapping": {
+    "repo_slot_phase": "finalizing",
+    "repo_slot_step": "sync_target",
+    "task_state": "FINALIZING",
+    "task_event": "UPDATED",
+    "task_event_detail": "任务已完成，已修复 stream 契约"
+  }
+}

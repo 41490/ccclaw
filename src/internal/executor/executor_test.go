@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/41490/ccclaw/internal/core"
 	"github.com/41490/ccclaw/internal/tmux"
 )
 
@@ -368,6 +369,44 @@ func TestLoadResultMaterializesStreamJSONStdoutArtifacts(t *testing.T) {
 	}
 	if _, err := os.Stat(artifacts.EventFile); err != nil {
 		t.Fatalf("预期生成 stream 事件快照文件: %v", err)
+	}
+}
+
+func TestLoadResultMaterializesClaudeSystemStreamJSONStdoutArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+	artifacts := execEngine.ArtifactPaths("75#stream-system")
+	if err := execEngine.writeRunMetadata(artifacts.MetaFile, runMetadata{OutputFormat: outputFormatStreamJSON}); err != nil {
+		t.Fatalf("写入元数据失败: %v", err)
+	}
+	streamRaw, err := os.ReadFile(filepath.Join("testdata", "stream_contract", "system_success.stream.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 stream fixture 失败: %v", err)
+	}
+	if err := os.WriteFile(artifacts.StdoutFile, streamRaw, 0o644); err != nil {
+		t.Fatalf("写入 stdout 暂存失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("75#stream-system")
+	if loadErr != nil {
+		t.Fatalf("预期 system stream-json 能被兼容解析，实际失败: %v", loadErr)
+	}
+	if result == nil || !strings.Contains(result.Output, "任务已完成") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	snapshot, err := execEngine.LoadStreamEventSnapshot("75#stream-system")
+	if err != nil {
+		t.Fatalf("读取 stream 快照失败: %v", err)
+	}
+	if snapshot == nil || snapshot.Mapping.TaskState != core.StateFinalizing {
+		t.Fatalf("预期 success result 继续主导快照，实际为 %#v", snapshot)
 	}
 }
 

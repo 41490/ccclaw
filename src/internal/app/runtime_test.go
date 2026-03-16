@@ -2395,7 +2395,13 @@ SECRET-LONG-BODY
 	}
 
 	prompt := rt.buildPrompt(task, target)
-	for _, want := range []string{"kb_path: " + targetKB, "git-conflict-resolve", "处理 git 冲突的最小路径"} {
+	for _, want := range []string{
+		"kb_path: " + targetKB,
+		"git-conflict-resolve",
+		"处理 git 冲突的最小路径",
+		"不要直接执行 `gh issue comment`",
+		"由 reporter 统一回帖并追加 `/ccclaw [DONE]`",
+	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("expected %q in prompt: %q", want, prompt)
 		}

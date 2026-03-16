@@ -1591,7 +1591,8 @@ func (rt *Runtime) buildPrompt(task *core.Task, target *config.TargetConfig) str
 	sb.WriteString("- 所有文档和注释使用中文\n")
 	sb.WriteString(fmt.Sprintf("- 完成后必须写工程报告到 `%s`\n", reportFile))
 	sb.WriteString("- 工程报告文件命名遵循 `yymmdd_[Issue No.]_[Case Summary].md`\n")
-	sb.WriteString("- 如需回复 Issue，请总结成果、测试结果和后续优化建议\n")
+	sb.WriteString("- 不要直接执行 `gh issue comment`、`gh issue close` 等 GitHub 生命周期操作\n")
+	sb.WriteString("- 需要反馈给 Issue 的结论，请写入工程报告和任务摘要，由 reporter 统一回帖并追加 `/ccclaw [DONE]`\n")
 	return sb.String()
 }
 

@@ -86,6 +86,9 @@ func marshalCompatibleResultFromStreamSnapshot(snapshot *StreamEventSnapshot, du
 	if snapshot == nil {
 		return nil, fmt.Errorf("stream 事件快照为空，无法生成兼容结果")
 	}
+	if !streamSnapshotHasResult(snapshot) && !streamSnapshotHasError(snapshot) {
+		return nil, fmt.Errorf("stream 事件快照缺少终态 result/error")
+	}
 	output := strings.TrimSpace(snapshot.Result)
 	if output == "" {
 		output = strings.TrimSpace(snapshot.Error)

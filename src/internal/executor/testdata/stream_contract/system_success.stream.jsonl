@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","timestamp":"2026-03-15T15:00:00Z","session_id":"sess-75","message":"Claude 初始化完成"}
+{"type":"system","subtype":"hook_started","timestamp":"2026-03-15T15:00:01Z","session_id":"sess-75","message":"SessionStart hook 已触发","step":"execute"}
+{"event":"progress","timestamp":"2026-03-15T15:00:02Z","session_id":"sess-75","message":"开始整理 Issue 决策","step":"analyze_issue"}
+{"type":"result","subtype":"success","timestamp":"2026-03-15T15:00:03Z","session_id":"sess-75","result":"任务已完成，已修复 stream 契约","total_cost_usd":0.21}
+{"type":"system","subtype":"postflight","timestamp":"2026-03-15T15:00:04Z","session_id":"sess-75","message":"未知 system 事件，仅记录告警","step":"sync_target"}

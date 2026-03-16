@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/41490/ccclaw/internal/core"
 )
 
 func TestAggregateStreamEventsWithFixtures(t *testing.T) {
@@ -106,5 +108,31 @@ func TestParseStreamJSONLRejectsUnknownEvent(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "无法识别事件类型") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseStreamJSONLAcceptsClaudeSystemEvents(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`{"type":"system","subtype":"init","timestamp":"2026-03-15T15:00:00Z","session_id":"sess-75","message":"初始化"}`,
+		`{"type":"system","subtype":"hook_started","timestamp":"2026-03-15T15:00:01Z","session_id":"sess-75","message":"SessionStart hook"}`,
+		`{"type":"result","subtype":"success","timestamp":"2026-03-15T15:00:02Z","session_id":"sess-75","result":"任务完成"}`,
+		`{"type":"system","subtype":"postflight","timestamp":"2026-03-15T15:00:03Z","session_id":"sess-75","message":"未知 system 事件"}`,
+	}, "\n"))
+	events, err := ParseStreamJSONL(raw)
+	if err != nil {
+		t.Fatalf("预期兼容 Claude system 事件，实际失败: %v", err)
+	}
+	snapshot := AggregateStreamEvents("75#body", events)
+	if snapshot == nil {
+		t.Fatal("预期生成 stream 快照")
+	}
+	if snapshot.LastEvent != StreamEventSystem {
+		t.Fatalf("预期保留最后一个 system 事件，实际为 %q", snapshot.LastEvent)
+	}
+	if snapshot.Mapping.TaskState != core.StateFinalizing {
+		t.Fatalf("预期 success result 继续主导收口，实际为 %#v", snapshot.Mapping)
+	}
+	if snapshot.Mapping.TaskEventDetail != "任务完成" {
+		t.Fatalf("预期沿用 success result 详情，实际为 %q", snapshot.Mapping.TaskEventDetail)
 	}
 }
