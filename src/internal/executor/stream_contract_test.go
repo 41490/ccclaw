@@ -141,12 +141,17 @@ func TestParseStreamJSONLAcceptsClaudeConversationFrames(t *testing.T) {
 }
 
 func TestParseStreamJSONLRejectsUnknownEvent(t *testing.T) {
-	_, err := ParseStreamJSONL([]byte(`{"event":"noop","timestamp":"2026-03-13T20:00:00Z"}`))
+	_, err := ParseStreamJSONL([]byte(`{"type":"debug","message":{"role":"assistant","content":[{"type":"meta_trace","text":"shadow"}]},"timestamp":"2026-03-13T20:00:00Z"}`))
 	if err == nil {
 		t.Fatal("预期拒绝未知事件")
 	}
 	if !strings.Contains(err.Error(), "无法识别事件类型") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{"第 1 行", "type=debug", "content[].type=meta_trace"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("预期错误信息包含 %q，实际为 %v", want, err)
+		}
 	}
 }
 

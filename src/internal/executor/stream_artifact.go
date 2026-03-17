@@ -12,12 +12,27 @@ import (
 
 func (e *Executor) PersistStreamEventSnapshot(taskID string, streamRaw []byte) (*StreamEventSnapshot, error) {
 	artifacts := e.ArtifactPaths(taskID)
-	if err := os.WriteFile(artifacts.StreamFile, streamRaw, 0o644); err != nil {
+	if err := writeStreamRawFile(artifacts.StreamFile, streamRaw); err != nil {
 		return nil, fmt.Errorf("写入 stream-json 原始流失败: %w", err)
 	}
 	events, err := ParseStreamJSONL(streamRaw)
 	if err != nil {
 		return nil, err
+	}
+	snapshot := AggregateStreamEvents(taskID, events)
+	if err := writeStreamEventSnapshotFile(artifacts.EventFile, snapshot); err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func (e *Executor) PersistStreamEventSnapshotFromEvents(taskID string, streamRaw []byte, events []StreamEvent) (*StreamEventSnapshot, error) {
+	artifacts := e.ArtifactPaths(taskID)
+	if err := writeStreamRawFile(artifacts.StreamFile, streamRaw); err != nil {
+		return nil, fmt.Errorf("写入 stream-json 原始流失败: %w", err)
+	}
+	if len(events) == 0 {
+		return nil, nil
 	}
 	snapshot := AggregateStreamEvents(taskID, events)
 	if err := writeStreamEventSnapshotFile(artifacts.EventFile, snapshot); err != nil {
@@ -78,6 +93,13 @@ func writeStreamEventSnapshotFile(path string, snapshot *StreamEventSnapshot) er
 	}
 	if err := os.WriteFile(path, payload, 0o644); err != nil {
 		return fmt.Errorf("写入 stream 事件快照失败: %w", err)
+	}
+	return nil
+}
+
+func writeStreamRawFile(path string, streamRaw []byte) error {
+	if err := os.WriteFile(path, streamRaw, 0o644); err != nil {
+		return err
 	}
 	return nil
 }

@@ -1429,6 +1429,26 @@ func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
 	}
 }
 
+func TestFormatExecutionFailureKeepsStructuredStreamDecodeContext(t *testing.T) {
+	runErr := errors.New("解析 Claude JSON 输出失败: stream-json 解码失败: 解析 stream-json 第 2 行失败: type=debug content[].type=meta_trace: 无法识别事件类型")
+	result := &executor.Result{
+		Output: "解析 stream-json 第 2 行失败: type=debug content[].type=meta_trace: 无法识别事件类型",
+	}
+
+	got := formatExecutionFailure(runErr, result)
+	if strings.Contains(got, "hook_started") {
+		t.Fatalf("不应再退化成文件前缀诊断，实际为 %q", got)
+	}
+	if strings.Contains(got, "；诊断输出:") {
+		t.Fatalf("结构化解码上下文已在主错误中，不应重复拼接诊断，实际为 %q", got)
+	}
+	for _, want := range []string{"第 2 行", "type=debug", "content[].type=meta_trace"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("预期失败信息包含 %q，实际为 %q", want, got)
+		}
+	}
+}
+
 func TestDescribeExecutorIncludesResolvedBinaryPaths(t *testing.T) {
 	tmpDir := t.TempDir()
 	homeDir := filepath.Join(tmpDir, "home")

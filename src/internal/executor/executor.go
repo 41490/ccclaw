@@ -428,12 +428,14 @@ func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID strin
 		rawStream.WriteByte('\n')
 		_, _ = logHandle.Write(line)
 		_, _ = logHandle.Write([]byte{'\n'})
-		if decodeErr != nil || len(bytes.TrimSpace(line)) == 0 {
+		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		event, err := parseStreamLine(lineNo, line)
 		if err != nil {
-			decodeErr = err
+			if decodeErr == nil {
+				decodeErr = fmt.Errorf("解析 stream-json 第 %d 行失败: %w", lineNo, err)
+			}
 			continue
 		}
 		events = append(events, event)
@@ -455,7 +457,17 @@ func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID strin
 	}
 
 	streamRaw := rawStream.Bytes()
-	snapshot, streamErr := e.PersistStreamEventSnapshot(taskID, streamRaw)
+	partialSnapshot := AggregateStreamEvents(taskID, events)
+	preferStreamResult := streamResultShouldWin(partialSnapshot)
+	var (
+		snapshot  *StreamEventSnapshot
+		streamErr error
+	)
+	if preferStreamResult {
+		snapshot, streamErr = e.PersistStreamEventSnapshotFromEvents(taskID, streamRaw, events)
+	} else {
+		snapshot, streamErr = e.PersistStreamEventSnapshot(taskID, streamRaw)
+	}
 	resultPayload, compatErr := marshalCompatibleResultFromStreamSnapshot(snapshot, duration)
 	if compatErr != nil {
 		resultPayload = streamRaw
@@ -463,7 +475,7 @@ func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID strin
 
 	result, parseErr := parseClaudeResult(resultPayload, duration, artifacts.LogFile, artifacts.ResultFile)
 	if parseErr != nil {
-		if decodeErr != nil {
+		if decodeErr != nil && !streamResultShouldWin(snapshot) {
 			parseErr = fmt.Errorf("stream-json 解码失败: %w", decodeErr)
 		} else if streamErr != nil {
 			parseErr = fmt.Errorf("stream-json 聚合失败: %w", streamErr)
@@ -479,10 +491,17 @@ func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID strin
 	}
 	if runErr != nil {
 		if result == nil {
-			result = &Result{Output: strings.TrimSpace(string(joinDiagnosticPayloads(streamRaw, stderr.Bytes()))), Duration: duration}
+			output := strings.TrimSpace(string(joinDiagnosticPayloads(streamRaw, stderr.Bytes())))
+			if shouldUseStructuredDecodeDiagnostic(decodeErr) && !streamResultShouldWin(snapshot) {
+				output = decodeErr.Error()
+			}
+			result = &Result{Output: output, Duration: duration}
 			e.applyArtifactMetadata(result, artifacts, meta)
 		}
 		result.ExitCode = exitCode
+		if streamResultShouldWin(snapshot) {
+			return result, nil
+		}
 		if parseErr != nil {
 			return result, fmt.Errorf("执行器运行失败: %w；结果校验失败: %v", runErr, parseErr)
 		}
@@ -490,11 +509,18 @@ func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID strin
 	}
 	if parseErr != nil {
 		if result != nil {
+			if shouldUseStructuredDecodeDiagnostic(decodeErr) && !streamResultShouldWin(snapshot) && strings.TrimSpace(result.Output) == "" {
+				result.Output = decodeErr.Error()
+			}
 			result.ExitCode = exitCode
 			return result, parseErr
 		}
+		output := strings.TrimSpace(string(joinDiagnosticPayloads(streamRaw, stderr.Bytes())))
+		if shouldUseStructuredDecodeDiagnostic(decodeErr) && !streamResultShouldWin(snapshot) {
+			output = decodeErr.Error()
+		}
 		fallback := &Result{
-			Output:   strings.TrimSpace(string(joinDiagnosticPayloads(streamRaw, stderr.Bytes()))),
+			Output:   output,
 			ExitCode: exitCode,
 			Duration: duration,
 		}
@@ -503,6 +529,29 @@ func (e *Executor) runSyncStreamJSON(ctx context.Context, repoPath, taskID strin
 	}
 	result.ExitCode = exitCode
 	return result, nil
+}
+
+func streamResultShouldWin(snapshot *StreamEventSnapshot) bool {
+	if snapshot == nil {
+		return false
+	}
+	return streamSnapshotHasResult(snapshot) && !streamSnapshotHasError(snapshot)
+}
+
+func shouldUseStructuredDecodeDiagnostic(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.TrimSpace(err.Error())
+	if text == "" {
+		return false
+	}
+	for _, marker := range []string{"type=", "subtype=", "content[].type=", "event="} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 type runMetadata struct {

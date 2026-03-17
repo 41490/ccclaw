@@ -277,7 +277,7 @@ func parseStreamLine(lineNo int, raw []byte) (StreamEvent, error) {
 	}
 	kind, err := resolveStreamEventKind(payload)
 	if err != nil {
-		return StreamEvent{}, err
+		return StreamEvent{}, wrapStreamPayloadError(payload, err)
 	}
 	timestamp, err := readTimeField(payload, "timestamp", "ts", "created_at")
 	if err != nil {
@@ -626,6 +626,65 @@ func summarizeMessageContent(raw json.RawMessage) string {
 		}
 	}
 	return ""
+}
+
+func wrapStreamPayloadError(payload map[string]json.RawMessage, err error) error {
+	if err == nil {
+		return nil
+	}
+	context := describeStreamPayload(payload)
+	if context == "" {
+		return err
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
+func describeStreamPayload(payload map[string]json.RawMessage) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 4)
+	if event := strings.ToLower(strings.TrimSpace(readStringField(payload, "event"))); event != "" {
+		parts = append(parts, "event="+event)
+	}
+	if topType := strings.ToLower(strings.TrimSpace(readStringField(payload, "type"))); topType != "" {
+		parts = append(parts, "type="+topType)
+	}
+	if subtype := strings.ToLower(strings.TrimSpace(readStringField(payload, "subtype"))); subtype != "" {
+		parts = append(parts, "subtype="+subtype)
+	}
+	if contentTypes := readMessageContentTypes(payload); len(contentTypes) > 0 {
+		parts = append(parts, "content[].type="+strings.Join(contentTypes, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+func readMessageContentTypes(payload map[string]json.RawMessage) []string {
+	raw, ok := payload["message"]
+	if !ok || len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil
+	}
+	var message map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return nil
+	}
+	rawContent, ok := message["content"]
+	if !ok || len(bytes.TrimSpace(rawContent)) == 0 || string(bytes.TrimSpace(rawContent)) == "null" {
+		return nil
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(rawContent, &items); err != nil {
+		return nil
+	}
+	contentTypes := make([]string, 0, len(items))
+	for _, item := range items {
+		contentType := strings.ToLower(strings.TrimSpace(readStringField(item, "type")))
+		if contentType == "" {
+			continue
+		}
+		contentTypes = append(contentTypes, contentType)
+	}
+	return contentTypes
 }
 
 func readBoolField(payload map[string]json.RawMessage, key string) bool {

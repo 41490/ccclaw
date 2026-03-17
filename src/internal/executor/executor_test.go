@@ -451,6 +451,75 @@ func TestLoadResultMaterializesClaudeConversationStreamJSONStdoutArtifacts(t *te
 	}
 }
 
+func TestExecutorRunStreamJSONPrefersSuccessResultOverUnknownFrame(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude-stream-success.sh")
+	script := "#!/bin/sh\ncat <<'EOF'\n" +
+		"{\"type\":\"system\",\"subtype\":\"init\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"session_id\":\"sess-b\"}\n" +
+		"{\"type\":\"debug\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"meta_trace\",\"text\":\"shadow marker\"}]},\"timestamp\":\"2026-03-17T12:00:01Z\",\"session_id\":\"sess-b\"}\n" +
+		"{\"type\":\"result\",\"subtype\":\"success\",\"timestamp\":\"2026-03-17T12:00:02Z\",\"session_id\":\"sess-b\",\"result\":\"任务完成\",\"total_cost_usd\":0.11}\n" +
+		"EOF\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	result, runErr := execEngine.Run(context.Background(), tmpDir, "79#plan-b", RunOptions{Prompt: "test prompt"})
+	if runErr != nil {
+		t.Fatalf("预期 success result 压住未知普通帧，实际失败: %v", runErr)
+	}
+	if result == nil || result.Output != "任务完成" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	snapshot, err := execEngine.LoadStreamEventSnapshot("79#plan-b")
+	if err != nil {
+		t.Fatalf("读取 stream 快照失败: %v", err)
+	}
+	if snapshot == nil || snapshot.Mapping.TaskState != core.StateFinalizing {
+		t.Fatalf("预期快照已按 success 收口，实际为 %#v", snapshot)
+	}
+	if snapshot.Result != "任务完成" {
+		t.Fatalf("预期保留 success result，实际为 %q", snapshot.Result)
+	}
+}
+
+func TestExecutorRunStreamJSONFailureCarriesPreciseDecodeContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude-stream-fail.sh")
+	script := "#!/bin/sh\ncat <<'EOF'\n" +
+		"{\"type\":\"system\",\"subtype\":\"init\",\"timestamp\":\"2026-03-17T12:00:00Z\",\"session_id\":\"sess-c\"}\n" +
+		"{\"type\":\"debug\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"meta_trace\",\"text\":\"shadow marker\"}]},\"timestamp\":\"2026-03-17T12:00:01Z\",\"session_id\":\"sess-c\"}\n" +
+		"EOF\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	result, runErr := execEngine.Run(context.Background(), tmpDir, "79#plan-c", RunOptions{Prompt: "test prompt"})
+	if runErr == nil {
+		t.Fatal("预期未知普通帧且无 success result 时返回失败")
+	}
+	for _, want := range []string{"第 2 行", "type=debug", "content[].type=meta_trace"} {
+		if !strings.Contains(runErr.Error(), want) {
+			t.Fatalf("预期错误信息包含 %q，实际为 %v", want, runErr)
+		}
+	}
+	if result == nil {
+		t.Fatal("预期返回带诊断的结果对象")
+	}
+	for _, want := range []string{"第 2 行", "type=debug", "content[].type=meta_trace"} {
+		if !strings.Contains(result.Output, want) {
+			t.Fatalf("预期诊断输出包含 %q，实际为 %q", want, result.Output)
+		}
+	}
+}
+
 func TestLoadResultReturnsStructuredErrorFromStreamJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
