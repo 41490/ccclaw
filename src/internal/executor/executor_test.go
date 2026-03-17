@@ -410,6 +410,47 @@ func TestLoadResultMaterializesClaudeSystemStreamJSONStdoutArtifacts(t *testing.
 	}
 }
 
+func TestLoadResultMaterializesClaudeConversationStreamJSONStdoutArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+	artifacts := execEngine.ArtifactPaths("79#stream-conversation")
+	if err := execEngine.writeRunMetadata(artifacts.MetaFile, runMetadata{OutputFormat: outputFormatStreamJSON}); err != nil {
+		t.Fatalf("写入元数据失败: %v", err)
+	}
+	streamRaw, err := os.ReadFile(filepath.Join("testdata", "stream_contract", "tool_result_success.stream.jsonl"))
+	if err != nil {
+		t.Fatalf("读取 stream fixture 失败: %v", err)
+	}
+	if err := os.WriteFile(artifacts.StdoutFile, streamRaw, 0o644); err != nil {
+		t.Fatalf("写入 stdout 暂存失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("79#stream-conversation")
+	if loadErr != nil {
+		t.Fatalf("预期 assistant/user 对话帧链路能成功收口，实际失败: %v", loadErr)
+	}
+	if result == nil || !strings.Contains(result.Output, "任务已完成") {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+	snapshot, err := execEngine.LoadStreamEventSnapshot("79#stream-conversation")
+	if err != nil {
+		t.Fatalf("读取 stream 快照失败: %v", err)
+	}
+	if snapshot == nil || snapshot.Mapping.TaskState != core.StateFinalizing {
+		t.Fatalf("预期 success result 继续主导快照，实际为 %#v", snapshot)
+	}
+	if snapshot.Mapping.TaskEventDetail != "任务已完成" {
+		t.Fatalf("预期最终详情仍由 success result 主导，实际为 %q", snapshot.Mapping.TaskEventDetail)
+	}
+}
+
 func TestLoadResultReturnsStructuredErrorFromStreamJSON(t *testing.T) {
 	tmpDir := t.TempDir()
 	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")

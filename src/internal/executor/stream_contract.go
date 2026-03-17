@@ -295,7 +295,7 @@ func parseStreamLine(lineNo int, raw []byte) (StreamEvent, error) {
 	if err != nil {
 		return StreamEvent{}, err
 	}
-	message := readStringField(payload, "message", "detail", "text")
+	message := readMessageDetail(payload)
 	resultText := readStringField(payload, "result")
 	subtype := strings.ToLower(strings.TrimSpace(readStringField(payload, "subtype")))
 	if kind == StreamEventResult && strings.TrimSpace(resultText) == "" {
@@ -357,6 +357,9 @@ func resolveStreamEventKind(payload map[string]json.RawMessage) (StreamEventKind
 	if strings.TrimSpace(readStringField(payload, "result")) != "" {
 		return StreamEventResult, nil
 	}
+	if hasRecognizedMessageContent(payload) {
+		return StreamEventProgress, nil
+	}
 	if strings.TrimSpace(readStringField(payload, "message", "step", "current_step")) != "" {
 		return StreamEventProgress, nil
 	}
@@ -367,7 +370,7 @@ func normalizeEventKind(raw string) StreamEventKind {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "started", "start", "begin":
 		return StreamEventStarted
-	case "progress", "update", "message", "assistant":
+	case "progress", "update", "message", "assistant", "user":
 		return StreamEventProgress
 	case "usage", "token", "metrics":
 		return StreamEventUsage
@@ -520,6 +523,105 @@ func readStringField(payload map[string]json.RawMessage, keys ...string) string 
 			value = strings.TrimSpace(value)
 			if value != "" {
 				return value
+			}
+		}
+	}
+	return ""
+}
+
+func readMessageDetail(payload map[string]json.RawMessage) string {
+	if detail := readStringField(payload, "detail", "text"); detail != "" {
+		return detail
+	}
+	raw, ok := payload["message"]
+	if !ok || len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var message map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return ""
+	}
+	if detail := readStringField(message, "text", "thinking", "message"); detail != "" {
+		return detail
+	}
+	rawContent, ok := message["content"]
+	if !ok {
+		return ""
+	}
+	return summarizeMessageContent(rawContent)
+}
+
+func hasRecognizedMessageContent(payload map[string]json.RawMessage) bool {
+	raw, ok := payload["message"]
+	if !ok || len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return false
+	}
+	var message map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &message); err != nil {
+		return false
+	}
+	rawContent, ok := message["content"]
+	if !ok || len(bytes.TrimSpace(rawContent)) == 0 || string(bytes.TrimSpace(rawContent)) == "null" {
+		return false
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(rawContent, &items); err != nil {
+		return false
+	}
+	for _, item := range items {
+		switch strings.ToLower(strings.TrimSpace(readStringField(item, "type"))) {
+		case "thinking", "text", "tool_use", "tool_result", "tool_use_result":
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeMessageContent(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return ""
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return ""
+	}
+	for _, item := range items {
+		kind := strings.ToLower(strings.TrimSpace(readStringField(item, "type")))
+		switch kind {
+		case "thinking":
+			if detail := readStringField(item, "thinking", "text"); detail != "" {
+				return detail
+			}
+			return "Claude 正在思考"
+		case "text":
+			if detail := readStringField(item, "text"); detail != "" {
+				return detail
+			}
+			return "Claude 输出文本"
+		case "tool_use":
+			if name := readStringField(item, "name"); name != "" {
+				return fmt.Sprintf("Claude 调用工具 %s", name)
+			}
+			return "Claude 调用工具"
+		case "tool_result", "tool_use_result":
+			if content := readStringField(item, "content", "text"); content != "" {
+				if readBoolField(item, "is_error") {
+					return fmt.Sprintf("工具返回错误: %s", content)
+				}
+				return fmt.Sprintf("工具返回结果: %s", content)
+			}
+			if readBoolField(item, "is_error") {
+				return "工具返回错误"
+			}
+			return "工具返回结果"
+		default:
+			if detail := readStringField(item, "text", "thinking", "content", "name"); detail != "" {
+				return detail
 			}
 		}
 	}

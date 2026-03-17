@@ -1,0 +1,19 @@
+{
+  "schema_version": "stream_event_contract/v1",
+  "task_id": "tool_result_success",
+  "session_id": "sess-78",
+  "event_count": 6,
+  "started_at": "2026-03-16T10:00:00Z",
+  "updated_at": "2026-03-16T10:00:05Z",
+  "last_event": "result",
+  "current_step": "sync_target",
+  "result": "任务已完成",
+  "cost_usd": 0.15,
+  "mapping": {
+    "repo_slot_phase": "finalizing",
+    "repo_slot_step": "sync_target",
+    "task_state": "FINALIZING",
+    "task_event": "UPDATED",
+    "task_event_detail": "任务已完成"
+  }
+}

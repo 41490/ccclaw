@@ -1,0 +1,6 @@
+{"type":"system","subtype":"init","timestamp":"2026-03-16T10:00:00Z","session_id":"sess-78"}
+{"type":"system","subtype":"hook_started","timestamp":"2026-03-16T10:00:01Z","session_id":"sess-78","message":"SessionStart hook 已触发"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"分析任务需求"}]},"timestamp":"2026-03-16T10:00:02Z","session_id":"sess-78"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hello"}}]},"timestamp":"2026-03-16T10:00:03Z","session_id":"sess-78"}
+{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01","type":"tool_result","content":"hello","is_error":false}]},"timestamp":"2026-03-16T10:00:04Z","session_id":"sess-78"}
+{"type":"result","subtype":"success","timestamp":"2026-03-16T10:00:05Z","session_id":"sess-78","result":"任务已完成","total_cost_usd":0.15}

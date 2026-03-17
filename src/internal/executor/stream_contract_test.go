@@ -101,6 +101,45 @@ func TestExecutorLoadStreamEventSnapshotRebuildsFromRaw(t *testing.T) {
 	}
 }
 
+func TestParseStreamJSONLAcceptsClaudeConversationFrames(t *testing.T) {
+	// 复现 #79：Claude 2.1.76 --verbose 输出的 assistant/user 对话帧不能导致任务失败
+	raw := []byte(strings.Join([]string{
+		`{"type":"system","subtype":"init","timestamp":"2026-03-16T10:00:00Z","session_id":"sess-79"}`,
+		`{"type":"system","subtype":"hook_started","timestamp":"2026-03-16T10:00:01Z","session_id":"sess-79","message":"SessionStart hook"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"分析任务"}]},"timestamp":"2026-03-16T10:00:02Z","session_id":"sess-79"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01","name":"Bash","input":{"command":"echo hi"}}]},"timestamp":"2026-03-16T10:00:03Z","session_id":"sess-79"}`,
+		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"准备汇总结果"}]},"timestamp":"2026-03-16T10:00:04Z","session_id":"sess-79"}`,
+		`{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01","type":"tool_result","content":"hi","is_error":false}]},"timestamp":"2026-03-16T10:00:05Z","session_id":"sess-79"}`,
+		`{"type":"result","subtype":"success","timestamp":"2026-03-16T10:00:06Z","session_id":"sess-79","result":"任务完成"}`,
+	}, "\n"))
+	events, err := ParseStreamJSONL(raw)
+	if err != nil {
+		t.Fatalf("预期 assistant/user 对话帧被兼容，实际失败: %v", err)
+	}
+	if got := events[2].Message; got != "分析任务" {
+		t.Fatalf("预期提取 thinking 详情，实际为 %q", got)
+	}
+	if got := events[3].Message; got != "Claude 调用工具 Bash" {
+		t.Fatalf("预期提取 tool_use 详情，实际为 %q", got)
+	}
+	if got := events[4].Message; got != "准备汇总结果" {
+		t.Fatalf("预期提取 text 详情，实际为 %q", got)
+	}
+	if got := events[5].Message; got != "工具返回结果: hi" {
+		t.Fatalf("预期提取 tool_result 详情，实际为 %q", got)
+	}
+	snapshot := AggregateStreamEvents("79#body", events)
+	if snapshot == nil {
+		t.Fatal("预期生成 stream 快照")
+	}
+	if snapshot.Mapping.TaskState != core.StateFinalizing {
+		t.Fatalf("预期 success result 主导收口，实际为 %#v", snapshot.Mapping)
+	}
+	if snapshot.Result != "任务完成" {
+		t.Fatalf("预期保留 success result，实际为 %q", snapshot.Result)
+	}
+}
+
 func TestParseStreamJSONLRejectsUnknownEvent(t *testing.T) {
 	_, err := ParseStreamJSONL([]byte(`{"event":"noop","timestamp":"2026-03-13T20:00:00Z"}`))
 	if err == nil {
