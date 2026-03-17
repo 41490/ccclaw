@@ -225,7 +225,7 @@ archived 节点保留在 nodes.jsonl，status=archived，永不删除，不参�
 
 **规则**：
 - 所有链接路径相对于 `kb/` 根
-- context.md 不超过 150 行，超出时截断保留 top-K
+- context.md 不超过 `context_max_lines`（默认 256 行，可配置），超出时截断保留 top-K
 - 每次 recall 完整覆写（临时文件 + rename，原子操作）
 - context.md 不入库（.gitignore）
 
@@ -408,10 +408,10 @@ kb/memory/nodes.jsonl
 
 ---
 
-## 开放问题（需 sysNOTA 确认）
+## 已确认决策（2026-03-17）
 
-1. **nodes.jsonl 丢失恢复**：skill 的 use_count 可从 frontmatter 恢复；journal/designs/assay 的 use_count 归零（score 只靠 recency）。可否接受？
+1. **nodes.jsonl 丢失恢复**：接受。skill use_count 从 frontmatter 恢复；journal/designs/assay use_count 归零，score 只靠 recency。
 
-2. **context.md 大小上限**：当前设计 top-10 节点，≤150行。是否需要可配置？
+2. **context.md 大小上限**：可配置，默认 **256 行**。配置项：`[kb] context_max_lines = 256`。
 
-3. **journal timer 增强时机**：`ccclaw recall --cold` 集成到 journal 命令，还是作为独立 post-hook 配置？
+3. **recall --cold 集成点**：集成到 **journal 命令末尾步骤**（不作为独立 post-hook）。
