@@ -53,3 +53,6 @@ bin/
 .claude/settings.*.json
 .claude/cache/
 .claude/tmp/
+
+# Git worktrees（本地隔离工作区）
+.worktrees/
