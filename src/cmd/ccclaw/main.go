@@ -70,6 +70,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.Flags().BoolVarP(&showVersion, "version", "V", false, "显示版本")
 	addArchiveCommand(rootCmd, &configPath)
 	addSevolverCommand(rootCmd, &configPath, &envFile)
+	addRecallCommand(rootCmd, &configPath, &envFile)
 	addClaudeHookCommand(rootCmd, &configPath)
 
 	newRuntime := func(cmd *cobra.Command) (*app.Runtime, error) {
