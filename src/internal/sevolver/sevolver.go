@@ -32,7 +32,7 @@ type Result struct {
 	Gaps                   []GapSignal
 	TaskEventGaps          []GapSignal
 	Dormant                []string
-	Deprecated             []string
+	Archived               []string
 	ReportPath             string
 	GapFilePath            string
 	DeepAnalysis           *DeepAnalysisDecision
@@ -108,8 +108,8 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 		switch action.Status {
 		case skillStatusDormant:
 			result.Dormant = append(result.Dormant, filepath.ToSlash(action.Path))
-		case skillStatusDeprecated:
-			result.Deprecated = append(result.Deprecated, filepath.ToSlash(action.Path))
+		case skillStatusArchived:
+			result.Archived = append(result.Archived, filepath.ToSlash(action.Path))
 		}
 	}
 
@@ -159,7 +159,7 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 	result.ReportPath = reportPath
 
 	if out != nil {
-		_, _ = fmt.Fprintf(out, "sevolver: hits=%d gaps=%d task_event_gaps=%d dormant=%d deprecated=%d\n", len(result.Hits), len(result.Gaps), len(result.TaskEventGaps), len(result.Dormant), len(result.Deprecated))
+		_, _ = fmt.Fprintf(out, "sevolver: hits=%d gaps=%d task_event_gaps=%d dormant=%d archived=%d\n", len(result.Hits), len(result.Gaps), len(result.TaskEventGaps), len(result.Dormant), len(result.Archived))
 		if result.DeepAnalysis != nil && result.DeepAnalysis.Triggered {
 			state := "reused"
 			if result.DeepAnalysis.Created {

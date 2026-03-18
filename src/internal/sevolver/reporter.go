@@ -18,7 +18,7 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 		fmt.Sprintf("- 缺口信号: %d", len(result.Gaps)),
 		fmt.Sprintf("- task_events 缺口: %d", len(result.TaskEventGaps)),
 		fmt.Sprintf("- dormant 处理: %d", len(result.Dormant)),
-		fmt.Sprintf("- deprecated 归档: %d", len(result.Deprecated)),
+		fmt.Sprintf("- archived 归档: %d", len(result.Archived)),
 	}
 	if result.DeepAnalysis != nil {
 		switch {
@@ -78,9 +78,9 @@ func WriteDailyReport(kbDir string, now time.Time, result Result) (string, error
 			lines = append(lines, "- "+filepath.ToSlash(item))
 		}
 	}
-	if len(result.Deprecated) > 0 {
-		lines = append(lines, "", "## deprecated")
-		for _, item := range result.Deprecated {
+	if len(result.Archived) > 0 {
+		lines = append(lines, "", "## archived")
+		for _, item := range result.Archived {
 			lines = append(lines, "- "+filepath.ToSlash(item))
 		}
 	}

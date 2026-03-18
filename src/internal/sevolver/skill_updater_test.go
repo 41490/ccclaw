@@ -100,8 +100,8 @@ status: dormant
 	if !strings.Contains(string(payload), "status: dormant") {
 		t.Fatalf("expected dormant status, got %q", string(payload))
 	}
-	archivedPath := filepath.Join(kbDir, "skills", "deprecated", "L2", "legacy", "CLAUDE.md")
+	archivedPath := filepath.Join(kbDir, "skills", "archived", "L2", "legacy", "CLAUDE.md")
 	if _, err := os.Stat(archivedPath); err != nil {
-		t.Fatalf("expected archived deprecated file, got %v", err)
+		t.Fatalf("expected archived skill file, got %v", err)
 	}
 }

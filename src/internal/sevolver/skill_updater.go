@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	skillStatusActive     = "active"
-	skillStatusDormant    = "dormant"
-	skillStatusDeprecated = "deprecated"
+	skillStatusActive   = "active"
+	skillStatusDormant  = "dormant"
+	skillStatusArchived = "archived"
 )
 
 type skillMeta struct {
@@ -46,9 +46,9 @@ type skillLifecycleAction struct {
 
 var numericFieldPattern = regexp.MustCompile(`(?m)^use_count:\s*(\d+)\s*$`)
 
-func isDeprecatedSkillDir(path string) bool {
+func isArchivedSkillDir(path string) bool {
 	clean := filepath.ToSlash(filepath.Clean(path))
-	return strings.HasSuffix(clean, "/skills/deprecated") || strings.Contains(clean, "/skills/deprecated/")
+	return strings.HasSuffix(clean, "/skills/archived") || strings.Contains(clean, "/skills/archived/")
 }
 
 func UpdateSkillMeta(skillFile string, hit SkillHit) error {
@@ -100,7 +100,7 @@ func MarkDormant(skillFile string) error {
 	return writeSkillFile(skillFile, content, meta, body)
 }
 
-func MarkDeprecated(skillFile string) error {
+func MarkArchived(skillFile string) error {
 	content, meta, body, err := readSkillFile(skillFile)
 	if err != nil {
 		return err
@@ -111,7 +111,7 @@ func MarkDeprecated(skillFile string) error {
 	if meta.GapSignals == nil {
 		meta.GapSignals = []string{}
 	}
-	meta.Status = skillStatusDeprecated
+	meta.Status = skillStatusArchived
 	return writeSkillFile(skillFile, content, meta, body)
 }
 
@@ -184,21 +184,21 @@ func ApplySkillGapEscalationResolution(skillFile string, targets []skillGapEscal
 	return true, writeSkillFile(skillFile, content, meta, body)
 }
 
-func ArchiveDeprecated(kbDir, skillFile string) (string, error) {
+func ArchiveSkill(kbDir, skillFile string) (string, error) {
 	skillsRoot := filepath.Join(strings.TrimSpace(kbDir), "skills")
 	rel, err := filepath.Rel(skillsRoot, skillFile)
 	if err != nil {
-		return "", fmt.Errorf("计算 deprecated 相对路径失败: %w", err)
+		return "", fmt.Errorf("计算 archived 相对路径失败: %w", err)
 	}
 	if strings.HasPrefix(rel, "..") {
 		return "", fmt.Errorf("skill 不在 skills 根目录下: %s", skillFile)
 	}
-	target := filepath.Join(skillsRoot, "deprecated", rel)
+	target := filepath.Join(skillsRoot, "archived", rel)
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return "", fmt.Errorf("创建 deprecated 目录失败: %w", err)
+		return "", fmt.Errorf("创建 archived 目录失败: %w", err)
 	}
 	if err := os.Rename(skillFile, target); err != nil {
-		return "", fmt.Errorf("迁移 deprecated skill 失败: %w", err)
+		return "", fmt.Errorf("迁移 archived skill 失败: %w", err)
 	}
 	return target, nil
 }
@@ -211,7 +211,7 @@ func processSkillLifecycle(kbDir string, now time.Time) ([]skillLifecycleAction,
 			return err
 		}
 		if d.IsDir() {
-			if isDeprecatedSkillDir(path) {
+			if isArchivedSkillDir(path) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -233,14 +233,14 @@ func processSkillLifecycle(kbDir string, now time.Time) ([]skillLifecycleAction,
 		inactiveDays := calendarDaysBetween(now, lastUsed)
 		switch {
 		case inactiveDays >= 28:
-			if err := MarkDeprecated(path); err != nil {
+			if err := MarkArchived(path); err != nil {
 				return err
 			}
-			target, err := ArchiveDeprecated(kbDir, path)
+			target, err := ArchiveSkill(kbDir, path)
 			if err != nil {
 				return err
 			}
-			actions = append(actions, skillLifecycleAction{Path: target, Status: skillStatusDeprecated})
+			actions = append(actions, skillLifecycleAction{Path: target, Status: skillStatusArchived})
 		case inactiveDays >= 14:
 			if err := MarkDormant(path); err != nil {
 				return err

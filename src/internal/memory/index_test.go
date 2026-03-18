@@ -96,18 +96,18 @@ keywords: [foo]
 		t.Fatalf("写入活动 skill 失败: %v", err)
 	}
 
-	deprecatedPath := filepath.Join(root, "skills", "deprecated", "L1", "old", "CLAUDE.md")
-	if err := os.MkdirAll(filepath.Dir(deprecatedPath), 0o755); err != nil {
-		t.Fatalf("创建 deprecated skill 目录失败: %v", err)
+	archivedPath := filepath.Join(root, "skills", "archived", "L1", "old", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(archivedPath), 0o755); err != nil {
+		t.Fatalf("创建 archived skill 目录失败: %v", err)
 	}
-	if err := os.WriteFile(deprecatedPath, []byte(`---
+	if err := os.WriteFile(archivedPath, []byte(`---
 name: old
-description: 已废弃 skill
+description: 已归档 skill
 keywords: [old]
 ---
 # old
 `), 0o644); err != nil {
-		t.Fatalf("写入 deprecated skill 失败: %v", err)
+		t.Fatalf("写入 archived skill 失败: %v", err)
 	}
 
 	idx, err := Build(root)
@@ -119,6 +119,6 @@ keywords: [old]
 		t.Fatalf("expected active skill to remain indexed, got %#v", hits)
 	}
 	if hits := idx.Match([]string{"old"}, 10); len(hits) != 0 {
-		t.Fatalf("deprecated skills should be excluded, got %#v", hits)
+		t.Fatalf("archived skills should be excluded, got %#v", hits)
 	}
 }

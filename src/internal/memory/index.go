@@ -35,7 +35,7 @@ func Build(root string) (*Index, error) {
 			return err
 		}
 		if d.IsDir() {
-			if isDeprecatedSkillsDir(path) {
+			if isArchivedSkillsDir(path) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -56,9 +56,9 @@ func Build(root string) (*Index, error) {
 	return index, nil
 }
 
-func isDeprecatedSkillsDir(path string) bool {
+func isArchivedSkillsDir(path string) bool {
 	clean := filepath.ToSlash(filepath.Clean(path))
-	return strings.HasSuffix(clean, "/skills/deprecated") || clean == "skills/deprecated"
+	return strings.HasSuffix(clean, "/skills/archived") || clean == "skills/archived"
 }
 
 func (idx *Index) Match(keywords []string, limit int) []Document {
