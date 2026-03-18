@@ -558,6 +558,7 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 	now := time.Now().UTC()
 	policy := classifyFinalizeFailure(err)
 	failureKey := buildFinalizeFailureKey(step, err)
+	shouldEnsureVisibleReport := slot.LastReportedAt.IsZero() && strings.TrimSpace(slot.LastReportedFailure) == ""
 	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizeFailed, finalizeStepName(step))
 	slot.LastError = strings.TrimSpace(err.Error())
 	slot.Hints = append([]string(nil), hints...)
@@ -597,8 +598,8 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 		existing.ErrorMsg = slot.LastError
 		return existing, nil
 	})
-	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("任务收尾失败[%s]: %s", step, slot.LastError))
-	if rt.rep != nil && slot.LastError != "" && shouldReportFinalizeFailure(slot, failureKey, policy.mode) {
+	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, buildFinalizeFailureEventDetail(step, slot.LastError))
+	if rt.rep != nil && slot.LastError != "" && shouldReportFinalizeFailure(slot, failureKey, shouldEnsureVisibleReport) {
 		_ = rt.rep.ReportFinalizing(task, step, slot.LastError, slot.Hints)
 		slot.LastReportedAt = now
 		slot.LastReportedFailure = failureKey
@@ -1165,14 +1166,22 @@ func buildFinalizeFailureKey(step string, err error) string {
 	return strings.TrimSpace(step) + "|" + strings.TrimSpace(err.Error())
 }
 
-func shouldReportFinalizeFailure(slot *storage.RepoSlot, failureKey string, mode finalizeFailureMode) bool {
+func buildFinalizeFailureEventDetail(step, errMsg string) string {
+	stepName := finalizeStepName(step)
+	if strings.TrimSpace(errMsg) == "" {
+		return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败", stepName)
+	}
+	return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败: %s", stepName, strings.TrimSpace(errMsg))
+}
+
+func shouldReportFinalizeFailure(slot *storage.RepoSlot, failureKey string, ensureVisibleReport bool) bool {
 	if slot == nil {
 		return false
 	}
-	if slot.LastReportedFailure == failureKey {
-		return false
+	if ensureVisibleReport {
+		return true
 	}
-	if mode == finalizeFailureRetry && slot.FinalizeRetryCount <= maxFinalizeRetry {
+	if slot.LastReportedFailure == failureKey {
 		return false
 	}
 	return true

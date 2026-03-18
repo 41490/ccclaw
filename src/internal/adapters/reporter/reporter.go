@@ -97,9 +97,9 @@ func (r *Reporter) ReportFinalizing(task *core.Task, step, errMsg string, hints 
 	if client == nil {
 		return nil
 	}
-	body := fmt.Sprintf("任务进入收尾待处理状态。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 失败步骤: `%s`\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, strings.TrimSpace(step), strings.TrimSpace(errMsg))
+	body := fmt.Sprintf("任务执行已完成，但交付收尾失败。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 执行结果: `已产出`\n- 当前失败步骤: %s\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, formatFinalizeStep(step), strings.TrimSpace(errMsg))
 	if len(hints) > 0 {
-		body += "\n\n建议处理:\n"
+		body += "\n\n下一步建议:\n"
 		for _, hint := range hints {
 			hint = strings.TrimSpace(hint)
 			if hint == "" {
@@ -110,6 +110,20 @@ func (r *Reporter) ReportFinalizing(task *core.Task, step, errMsg string, hints 
 	}
 	_, err := client.AddComment(task.IssueNumber, body)
 	return err
+}
+
+func formatFinalizeStep(step string) string {
+	step = strings.TrimSpace(step)
+	switch step {
+	case "target", "sync_target":
+		return "`sync_target`（目标仓同步）"
+	case "home", "sync_home":
+		return "`sync_home`（知识仓同步）"
+	case "report_issue":
+		return "`report_issue`（Issue 回帖）"
+	default:
+		return "`" + step + "`"
+	}
 }
 
 func splitFailureMessage(raw string) (string, string) {

@@ -1285,7 +1285,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 	}
 }
 
-func TestHandleFinalizeFailureBackoffSuppressesEarlyIssueNoise(t *testing.T) {
+func TestHandleFinalizeFailureReportsFirstVisibleFailureAndDedupsSameFailureKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")
 	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
@@ -1344,40 +1344,69 @@ printf '{}\n'
 	}
 
 	transientErr := errors.New("context deadline exceeded")
-	for attempt := 1; attempt <= maxFinalizeRetry; attempt++ {
-		if err := rt.handleFinalizeFailure(task, slot, "target", transientErr, []string{"网络抖动"}); err != nil {
-			t.Fatalf("第 %d 次 handleFinalizeFailure 失败: %v", attempt, err)
-		}
-		payload, readErr := os.ReadFile(logPath)
-		if readErr == nil && strings.TrimSpace(string(payload)) != "" {
-			t.Fatalf("第 %d 次不应回帖，实际日志=%q", attempt, string(payload))
-		}
-		loaded, err := store.GetRepoSlot(task.TargetRepo)
-		if err != nil {
-			t.Fatalf("读取仓位失败: %v", err)
-		}
-		if loaded == nil || loaded.FinalizeRetryCount != attempt || loaded.NextRetryAt.IsZero() {
-			t.Fatalf("unexpected slot after attempt %d: %#v", attempt, loaded)
-		}
-		slot = loaded
-	}
-
 	if err := rt.handleFinalizeFailure(task, slot, "target", transientErr, []string{"网络抖动"}); err != nil {
-		t.Fatalf("耗尽后 handleFinalizeFailure 失败: %v", err)
+		t.Fatalf("首轮 handleFinalizeFailure 失败: %v", err)
 	}
 	payload, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("读取 gh 日志失败: %v", err)
 	}
-	if !strings.Contains(string(payload), "repos/41490/ccclaw/issues/42/comments") {
-		t.Fatalf("expected reporter log after retry exhausted, got %q", string(payload))
+	logText := string(payload)
+	if strings.Count(logText, "repos/41490/ccclaw/issues/42/comments") != 1 {
+		t.Fatalf("首轮 finalize_failed 应回帖一次，实际日志=%q", logText)
+	}
+	for _, want := range []string{
+		"任务执行已完成，但交付收尾失败。",
+		"执行结果: `已产出`",
+		"当前失败步骤: `sync_target`",
+		"下次自动重试时间",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("首轮回帖缺少 %q，实际日志=%q", want, logText)
+		}
+	}
+	events, err := store.ListTaskEvents(5)
+	if err != nil {
+		t.Fatalf("读取事件失败: %v", err)
+	}
+	if len(events) == 0 || events[0].EventType != core.EventWarning || !strings.Contains(events[0].Detail, "执行结果已产出，收尾步骤 `sync_target` 失败") {
+		t.Fatalf("warning 事件文案不符合预期: %#v", events)
 	}
 	loaded, err := store.GetRepoSlot(task.TargetRepo)
 	if err != nil {
 		t.Fatalf("读取仓位失败: %v", err)
 	}
-	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() {
-		t.Fatalf("unexpected final slot: %#v", loaded)
+	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() || loaded.FinalizeRetryCount != 1 {
+		t.Fatalf("unexpected slot after first report: %#v", loaded)
+	}
+
+	if err := rt.handleFinalizeFailure(task, loaded, "target", transientErr, []string{"网络抖动"}); err != nil {
+		t.Fatalf("同一 failure key 二次 handleFinalizeFailure 失败: %v", err)
+	}
+	payload, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	if strings.Count(string(payload), "repos/41490/ccclaw/issues/42/comments") != 1 {
+		t.Fatalf("同一 failure key 不应重复回帖，实际日志=%q", string(payload))
+	}
+	loaded, err = store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取仓位失败: %v", err)
+	}
+	if loaded == nil || loaded.FinalizeRetryCount != 2 {
+		t.Fatalf("unexpected slot after duplicate failure key: %#v", loaded)
+	}
+
+	if err := rt.handleFinalizeFailure(task, loaded, "target", errors.New("connection reset by peer"), []string{"网络抖动"}); err != nil {
+		t.Fatalf("新 failure key handleFinalizeFailure 失败: %v", err)
+	}
+	payload, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	if strings.Count(string(payload), "repos/41490/ccclaw/issues/42/comments") != 2 {
+		t.Fatalf("新 failure key 应追加一次回帖，实际日志=%q", string(payload))
 	}
 }
 
