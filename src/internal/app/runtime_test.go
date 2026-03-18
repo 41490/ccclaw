@@ -2305,6 +2305,50 @@ func TestJournalWritesDailyFile(t *testing.T) {
 	}
 }
 
+func TestJournalTriggersRecallCold(t *testing.T) {
+	tmpDir := t.TempDir()
+	varDir := filepath.Join(tmpDir, "var")
+	kbRoot := filepath.Join(tmpDir, "kb")
+
+	store, err := storage.Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths: config.PathsConfig{
+				HomeRepo: tmpDir,
+				VarDir:   varDir,
+				KBDir:    kbRoot,
+			},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: filepath.Join(tmpDir, "target"),
+			}},
+			KB: config.KBConfig{ContextMaxLines: 256},
+		},
+		store:    store,
+		memRoot:  kbRoot,
+		ghCache:  map[string]*github.Client{},
+		memCache: map[string]*memory.Index{},
+		syncRepo: func(repoPath, message string, paths []string, maxRetry int) error {
+			return nil
+		},
+	}
+
+	var buf strings.Builder
+	if err := rt.Journal(time.Now(), &buf); err != nil {
+		t.Fatalf("Journal failed: %v", err)
+	}
+
+	contextPath := filepath.Join(kbRoot, "context.md")
+	if _, err := os.Stat(contextPath); os.IsNotExist(err) {
+		t.Error("Journal should have created context.md via cold recall")
+	}
+}
+
 func TestFinishTaskExecutionClearsResumeSessionAfterFailure(t *testing.T) {
 	store, err := storage.Open(filepath.Join(t.TempDir(), "var"))
 	if err != nil {

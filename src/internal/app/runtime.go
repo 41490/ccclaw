@@ -2414,6 +2414,11 @@ func (rt *Runtime) Journal(day time.Time, out io.Writer) error {
 		}
 	}
 	rt.logInfo("journal", "日报生成完成", "day", day.Format("2006-01-02"), "files", len(writtenPaths))
+	// 冷启动 recall：刷新 kb/context.md
+	if recallErr := rt.Recall(RecallOptions{Cold: true}, out); recallErr != nil {
+		rt.logWarning("journal", "recall 冷启动失败（非阻塞）", "error", recallErr)
+		_, _ = fmt.Fprintf(out, "警告: recall 冷启动失败: %v\n", recallErr)
+	}
 	return nil
 }
 
