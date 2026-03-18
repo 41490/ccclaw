@@ -185,6 +185,16 @@ func Run(cfg Config, out io.Writer) (*Result, error) {
 		}
 		_, _ = fmt.Fprintln(out, "sevolver: done")
 	}
+
+	// 候选技能识别（独立于日报窗口，扫描最近 14 天）
+	candidatesDir := filepath.Join(cfg.KBDir, "skills", "candidates")
+	candidateCount, candidateErr := DetectCandidates(journalDir, candidatesDir, now)
+	if candidateErr != nil {
+		result.Errors = append(result.Errors, fmt.Sprintf("候选技能检测失败: %v", candidateErr))
+	} else if candidateCount > 0 && out != nil {
+		_, _ = fmt.Fprintf(out, "发现 %d 个候选技能草稿，请查看 %s\n", candidateCount, candidatesDir)
+	}
+
 	return result, nil
 }
 
