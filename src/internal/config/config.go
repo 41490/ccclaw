@@ -32,7 +32,12 @@ type Config struct {
 	Executor      ExecutorConfig  `mapstructure:"executor" toml:"executor"`
 	Scheduler     SchedulerConfig `mapstructure:"scheduler" toml:"scheduler"`
 	Approval      ApprovalConfig  `mapstructure:"approval" toml:"approval"`
+	KB            KBConfig        `mapstructure:"kb" toml:"kb"`
 	Targets       []TargetConfig  `mapstructure:"targets" toml:"targets"`
+}
+
+type KBConfig struct {
+	ContextMaxLines int `mapstructure:"context_max_lines" toml:"context_max_lines"`
 }
 
 type ExecutorMode string
@@ -154,6 +159,7 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("approval.reject_words", defaultRejectWords())
 	v.SetDefault("approval.minimum_permission", "maintain")
 	v.SetDefault("default_target", "")
+	v.SetDefault("kb.context_max_lines", 256)
 
 	if err := v.ReadConfig(bytes.NewBufferString(updatedPayload)); err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)

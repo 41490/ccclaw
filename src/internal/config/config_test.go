@@ -545,6 +545,61 @@ local_path = "/opt/src/ccclaw"
 	}
 }
 
+func minimalValidTOML(extraSections ...string) string {
+	base := `
+[github]
+control_repo = "test/repo"
+
+[paths]
+app_dir    = "/tmp/ccclaw-test"
+home_repo  = "/tmp/ccclaw-repo"
+var_dir    = "/tmp/ccclaw-var"
+log_dir    = "/tmp/ccclaw-log"
+kb_dir     = "/tmp/ccclaw-kb"
+env_file   = "/tmp/ccclaw.env"
+
+[executor]
+command = ["claude"]
+`
+	for _, s := range extraSections {
+		base += "\n" + s
+	}
+	return base
+}
+
+func TestKBConfigContextMaxLinesDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(minimalValidTOML()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.KB.ContextMaxLines != 256 {
+		t.Fatalf("expected ContextMaxLines=256, got %d", cfg.KB.ContextMaxLines)
+	}
+}
+
+func TestKBConfigContextMaxLinesConfigurable(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(minimalValidTOML(`
+[kb]
+context_max_lines = 128
+`)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if cfg.KB.ContextMaxLines != 128 {
+		t.Fatalf("expected ContextMaxLines=128, got %d", cfg.KB.ContextMaxLines)
+	}
+}
+
 func TestMigrateLegacyApprovalNoopForMigratedConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
