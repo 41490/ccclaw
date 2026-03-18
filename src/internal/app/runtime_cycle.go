@@ -490,6 +490,9 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 			slot.LastAttemptAt = time.Now().UTC()
 			doneTask := *updated
 			doneTask.State = core.StateDone
+			if err := rt.reportFinalizeRecovery(updated, slot); err != nil {
+				rt.logError("finalize", "回帖收尾恢复说明失败", "task_id", updated.TaskID, "error", err)
+			}
 			comment := rt.reportSuccess(&doneTask, result.Duration, result.LogFile)
 			if comment == nil || comment.ID == 0 {
 				slot.ReportIssue = storage.FinalizeStepFailed
@@ -520,6 +523,27 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 	}
 	_ = rt.store.AppendEvent(updated.TaskID, core.EventDone, "任务执行完成")
 	return rt.store.DeleteRepoSlot(updated.TargetRepo)
+}
+
+func (rt *Runtime) reportFinalizeRecovery(task *core.Task, slot *storage.RepoSlot) error {
+	if rt == nil || rt.rep == nil || rt.store == nil || task == nil || slot == nil {
+		return nil
+	}
+	if !slot.RecoveryReportedAt.IsZero() {
+		return nil
+	}
+	if strings.TrimSpace(slot.LastFailureStep) == "" || slot.LastFailureClass == "" {
+		return nil
+	}
+	if err := rt.rep.ReportFinalizeRecovered(task, slot.LastFailureStep, slot.LastFailureClass); err != nil {
+		return err
+	}
+	slot.RecoveryReportedAt = time.Now().UTC()
+	if err := rt.store.UpsertRepoSlot(slot); err != nil {
+		return err
+	}
+	_ = rt.store.AppendEvent(task.TaskID, core.EventUpdated, buildFinalizeRecoveryEventDetail(slot.LastFailureStep, slot.LastFailureClass))
+	return nil
 }
 
 func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result *executor.Result, slot *storage.RepoSlot) error {
@@ -556,14 +580,18 @@ func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result
 
 func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot, step string, err error, hints []string) error {
 	now := time.Now().UTC()
-	policy := classifyFinalizeFailure(err)
+	assessment := assessFinalizeFailure(step, err)
+	policy := assessment.policy
 	failureKey := buildFinalizeFailureKey(step, err)
 	shouldEnsureVisibleReport := slot.LastReportedAt.IsZero() && strings.TrimSpace(slot.LastReportedFailure) == ""
 	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizeFailed, finalizeStepName(step))
 	slot.LastError = strings.TrimSpace(err.Error())
+	slot.FailureClass = assessment.class
 	slot.Hints = append([]string(nil), hints...)
 	slot.LastAttemptAt = now
 	stepName := finalizeStepName(step)
+	slot.LastFailureStep = stepName
+	slot.LastFailureClass = assessment.class
 	if slot.FinalizeRetryStep != stepName {
 		slot.FinalizeRetryStep = stepName
 		slot.FinalizeRetryCount = 0
@@ -598,9 +626,9 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 		existing.ErrorMsg = slot.LastError
 		return existing, nil
 	})
-	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, buildFinalizeFailureEventDetail(step, slot.LastError))
+	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, buildFinalizeFailureEventDetail(step, slot.FailureClass, slot.LastError))
 	if rt.rep != nil && slot.LastError != "" && shouldReportFinalizeFailure(slot, failureKey, shouldEnsureVisibleReport) {
-		_ = rt.rep.ReportFinalizing(task, step, slot.LastError, slot.Hints)
+		_ = rt.rep.ReportFinalizing(task, step, slot.FailureClass, slot.LastError, slot.Hints)
 		slot.LastReportedAt = now
 		slot.LastReportedFailure = failureKey
 		_ = rt.store.UpsertRepoSlot(slot)
@@ -620,7 +648,8 @@ func (rt *Runtime) syncFinalizeTarget(task *core.Task) (storage.FinalizeStepStat
 	if err == nil {
 		return storage.FinalizeStepOK, nil, nil
 	}
-	return finalizeFailureState(err), buildFinalizeHints(task.TargetRepo, target.LocalPath, err), err
+	class := classifyFinalizeFailureClass("target", err)
+	return finalizeFailureState(err), buildFinalizeHints(task.TargetRepo, target.LocalPath, err, class), err
 }
 
 func (rt *Runtime) syncFinalizeHome(task *core.Task) (storage.FinalizeStepState, []string, error) {
@@ -636,7 +665,8 @@ func (rt *Runtime) syncFinalizeHome(task *core.Task) (storage.FinalizeStepState,
 	if err == nil {
 		return storage.FinalizeStepOK, nil, nil
 	}
-	return finalizeFailureState(err), buildFinalizeHints("知识仓库", homeRepo, err), err
+	class := classifyFinalizeFailureClass("home", err)
+	return finalizeFailureState(err), buildFinalizeHints("知识仓库", homeRepo, err, class), err
 }
 
 func finalizeFailureState(err error) storage.FinalizeStepState {
@@ -649,13 +679,19 @@ func finalizeFailureState(err error) storage.FinalizeStepState {
 	return storage.FinalizeStepFailed
 }
 
-func buildFinalizeHints(repo, localPath string, err error) []string {
+func buildFinalizeHints(repo, localPath string, err error, class storage.FinalizeFailureClass) []string {
 	hints := []string{
 		fmt.Sprintf("本机仓库路径: `%s`", localPath),
 		"建议先执行 `jj st` 确认当前工作区状态",
 		"建议再执行 `jj log -r 'conflicts()|@|@-'` 查看冲突与最近变更",
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	if class == storage.FinalizeFailureClassVersionMismatch {
+		hints = append(hints,
+			"请先执行 `jj --version` 与 `git --version` 核对本机版本",
+			"若当前 git 低于 `2.41.0`，请优先升级 git，或切换匹配的 jj 版本后再重试",
+		)
+	}
 	if errors.Is(err, vcs.ErrConflict) {
 		hints = append(hints,
 			"请在 GitHub 仓库的 `Code -> Commits` 查看远端最近提交",
@@ -1027,6 +1063,7 @@ func markFinalizeStepDone(slot *storage.RepoSlot, completedStep string) {
 		return
 	}
 	slot.LastError = ""
+	slot.FailureClass = ""
 	slot.Hints = nil
 	slot.NextRetryAt = time.Time{}
 	slot.LastReportedAt = time.Time{}
@@ -1079,6 +1116,11 @@ type finalizeFailurePolicy struct {
 	delay time.Duration
 }
 
+type finalizeFailureAssessment struct {
+	class  storage.FinalizeFailureClass
+	policy finalizeFailurePolicy
+}
+
 func (p finalizeFailurePolicy) nextDelay(retryCount int) time.Duration {
 	if p.mode == finalizeFailurePause {
 		return p.delay
@@ -1099,18 +1141,114 @@ func (p finalizeFailurePolicy) nextDelay(retryCount int) time.Duration {
 	return delay
 }
 
-func classifyFinalizeFailure(err error) finalizeFailurePolicy {
+func assessFinalizeFailure(step string, err error) finalizeFailureAssessment {
+	policy := finalizeFailurePolicy{mode: finalizeFailurePause, delay: finalizeRetryManualDelay}
 	if isTransientFinalizeError(err) {
-		return finalizeFailurePolicy{mode: finalizeFailureRetry, delay: finalizeRetryBaseDelay}
+		policy = finalizeFailurePolicy{mode: finalizeFailureRetry, delay: finalizeRetryBaseDelay}
 	}
-	return finalizeFailurePolicy{mode: finalizeFailurePause, delay: finalizeRetryManualDelay}
+	return finalizeFailureAssessment{
+		class:  classifyFinalizeFailureClass(step, err),
+		policy: policy,
+	}
+}
+
+func classifyFinalizeFailureClass(step string, err error) storage.FinalizeFailureClass {
+	if strings.TrimSpace(step) == "report_issue" {
+		return storage.FinalizeFailureClassIssueReporting
+	}
+	if err == nil {
+		return storage.FinalizeFailureClassUnknown
+	}
+	if errors.Is(err, vcs.ErrConflict) {
+		return storage.FinalizeFailureClassConflict
+	}
+	if errors.Is(err, vcs.ErrGitTooOld) {
+		return storage.FinalizeFailureClassVersionMismatch
+	}
+	if errors.Is(err, vcs.ErrJJNotAvailable) {
+		return storage.FinalizeFailureClassConfig
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"supported version is",
+		"git 版本过低",
+		"git version",
+		"jj/git",
+		"porcelain",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassVersionMismatch
+		}
+	}
+	for _, marker := range []string{
+		"protected branch",
+		"branch protection",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassProtection
+		}
+	}
+	for _, marker := range []string{
+		"permission denied",
+		"authentication",
+		"not authorized",
+		"repository not found",
+		"403",
+		"401",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassAuth
+		}
+	}
+	for _, marker := range []string{
+		"仓库路径不能为空",
+		"请检查目标仓配置",
+		"读取 git 版本失败",
+		"读取 jj 版本失败",
+		"读取 .jj 状态失败",
+		"创建仓库目录失败",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassConfig
+		}
+	}
+	for _, marker := range []string{
+		"timeout",
+		"timed out",
+		"temporary",
+		"temporarily",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"tls handshake timeout",
+		"context deadline exceeded",
+		"unexpected eof",
+		"eof",
+		"internal server error",
+		"bad gateway",
+		"service unavailable",
+		"gateway timeout",
+		"http 502",
+		"http 503",
+		"http 504",
+		"rate limit",
+		"dial tcp",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassNetwork
+		}
+	}
+	return storage.FinalizeFailureClassUnknown
 }
 
 func isTransientFinalizeError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) {
+	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) || errors.Is(err, vcs.ErrGitTooOld) {
 		return false
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
@@ -1166,12 +1304,17 @@ func buildFinalizeFailureKey(step string, err error) string {
 	return strings.TrimSpace(step) + "|" + strings.TrimSpace(err.Error())
 }
 
-func buildFinalizeFailureEventDetail(step, errMsg string) string {
+func buildFinalizeFailureEventDetail(step string, class storage.FinalizeFailureClass, errMsg string) string {
 	stepName := finalizeStepName(step)
+	classText := formatFinalizeFailureClass(class)
 	if strings.TrimSpace(errMsg) == "" {
-		return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败", stepName)
+		return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败；失败类型 %s", stepName, classText)
 	}
-	return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败: %s", stepName, strings.TrimSpace(errMsg))
+	return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败；失败类型 %s: %s", stepName, classText, strings.TrimSpace(errMsg))
+}
+
+func buildFinalizeRecoveryEventDetail(step string, class storage.FinalizeFailureClass) string {
+	return fmt.Sprintf("收尾恢复完成：此前 `%s` 的失败类型 %s 已恢复，任务继续完成交付", finalizeStepName(step), formatFinalizeFailureClass(class))
 }
 
 func shouldReportFinalizeFailure(slot *storage.RepoSlot, failureKey string, ensureVisibleReport bool) bool {
@@ -1185,4 +1328,11 @@ func shouldReportFinalizeFailure(slot *storage.RepoSlot, failureKey string, ensu
 		return false
 	}
 	return true
+}
+
+func formatFinalizeFailureClass(class storage.FinalizeFailureClass) string {
+	if class == "" {
+		class = storage.FinalizeFailureClassUnknown
+	}
+	return fmt.Sprintf("`%s`（%s）", class, class.Display())
 }

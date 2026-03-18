@@ -15,6 +15,7 @@ var (
 	ErrJJNotAvailable = errors.New("jj 未安装")
 	ErrConflict       = errors.New("jj rebase 产生冲突，需人工解决")
 	ErrPushFailed     = errors.New("jj git push 重试耗尽")
+	ErrGitTooOld      = errors.New("git 版本过低，不满足 jj 同步要求")
 )
 
 const (
@@ -22,6 +23,7 @@ const (
 	commandTimeout  = 30 * time.Second
 	defaultBookmark = "main"
 	defaultRemote   = "origin"
+	minGitVersion   = "2.41.0"
 )
 
 // SyncRepo 使用 jj 在本地提交并尽力同步远端。
@@ -57,6 +59,9 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 			return err
 		}
 		_, err := commitChanges(repoPath, message, normalizedPaths)
+		return err
+	}
+	if err := ensureSyncCapabilities(repoPath); err != nil {
 		return err
 	}
 
@@ -102,6 +107,70 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 		lastErr = errors.New("未获得可用的推送结果")
 	}
 	return fmt.Errorf("%w: %v", ErrPushFailed, lastErr)
+}
+
+func ensureSyncCapabilities(repoPath string) error {
+	jjVersion, err := runJJOutput("", "--version")
+	if err != nil {
+		return fmt.Errorf("读取 jj 版本失败: %w", err)
+	}
+	gitVersion, err := runGitOutput("", "--version")
+	if err != nil {
+		return fmt.Errorf("读取 git 版本失败: %w", err)
+	}
+	gitVersion = strings.TrimSpace(gitVersion)
+	jjVersion = strings.TrimSpace(jjVersion)
+	if compareVersion(gitVersionNumber(gitVersion), minGitVersion) < 0 {
+		return fmt.Errorf("%w: 当前 git=%s，jj=%s；请升级 git 至 %s 及以上，或切换匹配的 jj 版本", ErrGitTooOld, gitVersion, jjVersion, minGitVersion)
+	}
+	return nil
+}
+
+func gitVersionNumber(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[len(fields)-1]
+}
+
+func compareVersion(left, right string) int {
+	leftParts := strings.Split(strings.TrimSpace(left), ".")
+	rightParts := strings.Split(strings.TrimSpace(right), ".")
+	maxLen := len(leftParts)
+	if len(rightParts) > maxLen {
+		maxLen = len(rightParts)
+	}
+	for idx := 0; idx < maxLen; idx++ {
+		leftNum := versionPart(leftParts, idx)
+		rightNum := versionPart(rightParts, idx)
+		if leftNum < rightNum {
+			return -1
+		}
+		if leftNum > rightNum {
+			return 1
+		}
+	}
+	return 0
+}
+
+func versionPart(parts []string, idx int) int {
+	if idx >= len(parts) {
+		return 0
+	}
+	value := strings.TrimSpace(parts[idx])
+	total := 0
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			break
+		}
+		total = total*10 + int(r-'0')
+	}
+	return total
 }
 
 func ensureJJRepo(repoPath string) error {

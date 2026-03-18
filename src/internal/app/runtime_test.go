@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/41490/ccclaw/internal/executor"
 	"github.com/41490/ccclaw/internal/memory"
 	"github.com/41490/ccclaw/internal/scheduler"
+	"github.com/41490/ccclaw/internal/vcs"
 )
 
 func TestParseTargetRepo(t *testing.T) {
@@ -1223,6 +1225,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 		TaskID:             task.TaskID,
 		Phase:              storage.RepoSlotPhaseFinalizeFailed,
 		CurrentStep:        "sync_home",
+		FailureClass:       storage.FinalizeFailureClassProtection,
 		FinalizeRetryStep:  "sync_home",
 		FinalizeRetryCount: 2,
 		SyncTarget:         storage.FinalizeStepOK,
@@ -1264,6 +1267,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 			Items []struct {
 				Phase              string `json:"phase"`
 				CurrentStep        string `json:"current_step"`
+				FailureClass       string `json:"failure_class"`
 				FinalizeRetryStep  string `json:"finalize_retry_step"`
 				FinalizeRetryCount int    `json:"finalize_retry_count"`
 				NextRetryAt        string `json:"next_retry_at"`
@@ -1280,7 +1284,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 		t.Fatalf("unexpected slots payload: %+v", payload.Slots)
 	}
 	item := payload.Slots.Items[0]
-	if item.Phase != string(storage.RepoSlotPhaseFinalizeFailed) || item.CurrentStep != "sync_home" || item.FinalizeRetryStep != "sync_home" || item.FinalizeRetryCount != 2 || item.NextRetryAt == "" {
+	if item.Phase != string(storage.RepoSlotPhaseFinalizeFailed) || item.CurrentStep != "sync_home" || item.FailureClass != string(storage.FinalizeFailureClassProtection) || item.FinalizeRetryStep != "sync_home" || item.FinalizeRetryCount != 2 || item.NextRetryAt == "" {
 		t.Fatalf("unexpected slot item: %+v", item)
 	}
 }
@@ -1359,6 +1363,7 @@ printf '{}\n'
 		"任务执行已完成，但交付收尾失败。",
 		"执行结果: `已产出`",
 		"当前失败步骤: `sync_target`",
+		"失败类型: `network`",
 		"下次自动重试时间",
 	} {
 		if !strings.Contains(logText, want) {
@@ -1376,7 +1381,7 @@ printf '{}\n'
 	if err != nil {
 		t.Fatalf("读取仓位失败: %v", err)
 	}
-	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() || loaded.FinalizeRetryCount != 1 {
+	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() || loaded.FinalizeRetryCount != 1 || loaded.FailureClass != storage.FinalizeFailureClassNetwork {
 		t.Fatalf("unexpected slot after first report: %#v", loaded)
 	}
 
@@ -1407,6 +1412,127 @@ printf '{}\n'
 	}
 	if strings.Count(string(payload), "repos/41490/ccclaw/issues/42/comments") != 2 {
 		t.Fatalf("新 failure key 应追加一次回帖，实际日志=%q", string(payload))
+	}
+}
+
+func TestAssessFinalizeFailureVersionMismatchReturnsPause(t *testing.T) {
+	err := fmt.Errorf("%w: 当前 git=git version 2.39.5，jj=jj 0.39.0；请升级 git 至 2.41.0 及以上，或切换匹配的 jj 版本", vcs.ErrGitTooOld)
+	assessment := assessFinalizeFailure("target", err)
+	if assessment.class != storage.FinalizeFailureClassVersionMismatch {
+		t.Fatalf("expected version_mismatch, got %s", assessment.class)
+	}
+	if assessment.policy.mode != finalizeFailurePause {
+		t.Fatalf("expected pause policy, got %+v", assessment.policy)
+	}
+}
+
+func TestReportFinalizeRecoveryPostsSingleRecoveryComment(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$@" >> "$CCCLAW_REPORTER_LOG"
+printf '{}\n'
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         core.TaskID("41490/ccclaw", 43),
+		IdempotencyKey: core.IdempotencyKey("41490/ccclaw", 43),
+		ControlRepo:    "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    43,
+		IssueTitle:     "finalize recovered",
+		State:          core.StateFinalizing,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+	slot := &storage.RepoSlot{
+		TargetRepo:       task.TargetRepo,
+		TaskID:           task.TaskID,
+		Phase:            storage.RepoSlotPhaseFinalizing,
+		LastFailureStep:  "sync_target",
+		LastFailureClass: storage.FinalizeFailureClassVersionMismatch,
+	}
+	if err := store.UpsertRepoSlot(slot); err != nil {
+		t.Fatalf("写入仓位失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths:  config.PathsConfig{VarDir: varDir, KBDir: "/opt/ccclaw/kb"},
+		},
+		store: store,
+		rep: reporter.New(func(repo string) *github.Client {
+			return github.NewClient(repo, map[string]string{})
+		}),
+	}
+
+	if err := rt.reportFinalizeRecovery(task, slot); err != nil {
+		t.Fatalf("首轮 recovery 回帖失败: %v", err)
+	}
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	logText := string(payload)
+	if strings.Count(logText, "repos/41490/ccclaw/issues/43/comments") != 1 {
+		t.Fatalf("预期 recovery 回帖一次，实际日志=%q", logText)
+	}
+	for _, want := range []string{
+		"收尾失败已恢复",
+		"`sync_target`",
+		"`version_mismatch`",
+	} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("recovery 回帖缺少 %q，实际日志=%q", want, logText)
+		}
+	}
+	loaded, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取仓位失败: %v", err)
+	}
+	if loaded == nil || loaded.RecoveryReportedAt.IsZero() {
+		t.Fatalf("预期记录 recovery 回帖时间，实际=%#v", loaded)
+	}
+	events, err := store.ListTaskEvents(5)
+	if err != nil {
+		t.Fatalf("读取事件失败: %v", err)
+	}
+	if len(events) == 0 || events[0].EventType != core.EventUpdated || !strings.Contains(events[0].Detail, "收尾恢复完成") {
+		t.Fatalf("recovery 事件不符合预期: %#v", events)
+	}
+
+	if err := rt.reportFinalizeRecovery(task, loaded); err != nil {
+		t.Fatalf("重复 recovery 回帖失败: %v", err)
+	}
+	payload, err = os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	if strings.Count(string(payload), "repos/41490/ccclaw/issues/43/comments") != 1 {
+		t.Fatalf("重复 recovery 不应追加回帖，实际日志=%q", string(payload))
 	}
 }
 

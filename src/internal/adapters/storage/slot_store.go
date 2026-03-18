@@ -30,30 +30,68 @@ const (
 	FinalizeStepConflict FinalizeStepState = "conflict"
 )
 
+type FinalizeFailureClass string
+
+const (
+	FinalizeFailureClassUnknown         FinalizeFailureClass = "unknown"
+	FinalizeFailureClassNetwork         FinalizeFailureClass = "network"
+	FinalizeFailureClassConflict        FinalizeFailureClass = "conflict"
+	FinalizeFailureClassAuth            FinalizeFailureClass = "auth"
+	FinalizeFailureClassProtection      FinalizeFailureClass = "protection"
+	FinalizeFailureClassVersionMismatch FinalizeFailureClass = "version_mismatch"
+	FinalizeFailureClassConfig          FinalizeFailureClass = "config"
+	FinalizeFailureClassIssueReporting  FinalizeFailureClass = "issue_reporting"
+)
+
+func (c FinalizeFailureClass) Display() string {
+	switch c {
+	case FinalizeFailureClassNetwork:
+		return "网络抖动"
+	case FinalizeFailureClassConflict:
+		return "仓库冲突"
+	case FinalizeFailureClassAuth:
+		return "认证或权限"
+	case FinalizeFailureClassProtection:
+		return "分支保护"
+	case FinalizeFailureClassVersionMismatch:
+		return "jj/git 兼容"
+	case FinalizeFailureClassConfig:
+		return "环境或配置"
+	case FinalizeFailureClassIssueReporting:
+		return "Issue 回帖"
+	default:
+		return "待分类"
+	}
+}
+
 type RepoSlot struct {
-	TargetRepo          string            `json:"target_repo"`
-	TaskID              string            `json:"task_id"`
-	ExecutorMode        string            `json:"executor_mode,omitempty"`
-	SessionName         string            `json:"session_name,omitempty"`
-	SessionID           string            `json:"session_id,omitempty"`
-	Phase               RepoSlotPhase     `json:"phase"`
-	CurrentStep         string            `json:"current_step,omitempty"`
-	RestartCount        int               `json:"restart_count,omitempty"`
-	FinalizeRetryStep   string            `json:"finalize_retry_step,omitempty"`
-	FinalizeRetryCount  int               `json:"finalize_retry_count,omitempty"`
-	SyncTarget          FinalizeStepState `json:"sync_target,omitempty"`
-	SyncHome            FinalizeStepState `json:"sync_home,omitempty"`
-	ReportIssue         FinalizeStepState `json:"report_issue,omitempty"`
-	LastError           string            `json:"last_error,omitempty"`
-	Hints               []string          `json:"hints,omitempty"`
-	LastProbeAt         time.Time         `json:"last_probe_at,omitempty"`
-	LastAttemptAt       time.Time         `json:"last_attempt_at,omitempty"`
-	LastAdvanceAt       time.Time         `json:"last_advance_at,omitempty"`
-	NextRetryAt         time.Time         `json:"next_retry_at,omitempty"`
-	LastReportedAt      time.Time         `json:"last_reported_at,omitempty"`
-	LastReportedFailure string            `json:"last_reported_failure,omitempty"`
-	UpdatedAt           time.Time         `json:"updated_at"`
-	CompletedAt         time.Time         `json:"completed_at,omitempty"`
+	TargetRepo          string               `json:"target_repo"`
+	TaskID              string               `json:"task_id"`
+	ExecutorMode        string               `json:"executor_mode,omitempty"`
+	SessionName         string               `json:"session_name,omitempty"`
+	SessionID           string               `json:"session_id,omitempty"`
+	Phase               RepoSlotPhase        `json:"phase"`
+	CurrentStep         string               `json:"current_step,omitempty"`
+	RestartCount        int                  `json:"restart_count,omitempty"`
+	FinalizeRetryStep   string               `json:"finalize_retry_step,omitempty"`
+	FinalizeRetryCount  int                  `json:"finalize_retry_count,omitempty"`
+	SyncTarget          FinalizeStepState    `json:"sync_target,omitempty"`
+	SyncHome            FinalizeStepState    `json:"sync_home,omitempty"`
+	ReportIssue         FinalizeStepState    `json:"report_issue,omitempty"`
+	FailureClass        FinalizeFailureClass `json:"failure_class,omitempty"`
+	LastError           string               `json:"last_error,omitempty"`
+	Hints               []string             `json:"hints,omitempty"`
+	LastProbeAt         time.Time            `json:"last_probe_at,omitempty"`
+	LastAttemptAt       time.Time            `json:"last_attempt_at,omitempty"`
+	LastAdvanceAt       time.Time            `json:"last_advance_at,omitempty"`
+	NextRetryAt         time.Time            `json:"next_retry_at,omitempty"`
+	LastReportedAt      time.Time            `json:"last_reported_at,omitempty"`
+	LastReportedFailure string               `json:"last_reported_failure,omitempty"`
+	LastFailureStep     string               `json:"last_failure_step,omitempty"`
+	LastFailureClass    FinalizeFailureClass `json:"last_failure_class,omitempty"`
+	RecoveryReportedAt  time.Time            `json:"recovery_reported_at,omitempty"`
+	UpdatedAt           time.Time            `json:"updated_at"`
+	CompletedAt         time.Time            `json:"completed_at,omitempty"`
 }
 
 type RepoSlotStore struct {

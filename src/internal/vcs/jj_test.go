@@ -2,6 +2,7 @@ package vcs
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 func TestSyncRepoTracksPathsAndRetriesPush(t *testing.T) {
 	repoPath := initGitRepo(t, true)
 	logFile, committedFile := prepareFakeJJ(t)
+	prepareGitVersionShim(t, "git version 2.42.0")
 	pushState := filepath.Join(t.TempDir(), "push-count")
 	t.Setenv("JJ_LOG_FILE", logFile)
 	t.Setenv("JJ_COMMITTED_FILE", committedFile)
@@ -50,6 +52,7 @@ func TestSyncRepoStopsOnConflict(t *testing.T) {
 		t.Fatalf("准备 origin/main 失败: %v (%s)", err, output)
 	}
 	logFile, committedFile := prepareFakeJJ(t)
+	prepareGitVersionShim(t, "git version 2.42.0")
 	t.Setenv("JJ_LOG_FILE", logFile)
 	t.Setenv("JJ_COMMITTED_FILE", committedFile)
 	t.Setenv("JJ_CONFLICT", "1")
@@ -81,6 +84,27 @@ func TestSyncRepoWithoutRemoteOnlyCommitsLocalChanges(t *testing.T) {
 	}
 	if !containsCommand(commands, "file track .") || !containsCommand(commands, "commit -m patrol: sync") {
 		t.Fatalf("expected local track+commit, got %#v", commands)
+	}
+}
+
+func TestSyncRepoFailsFastWhenGitVersionTooOld(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	prepareGitVersionShim(t, "git version 2.39.5")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !strings.Contains(err.Error(), ErrGitTooOld.Error()) {
+		t.Fatalf("expected git-too-old error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "jj 0.39.0") || !strings.Contains(err.Error(), "2.41.0") {
+		t.Fatalf("expected version diagnostic, got %v", err)
+	}
+
+	commands := readCommands(t, logFile)
+	if containsCommand(commands, "git fetch --remote origin") {
+		t.Fatalf("前置探测失败后不应继续 fetch，实际命令=%#v", commands)
 	}
 }
 
@@ -133,6 +157,9 @@ if [[ "${1:-}" == "-R" ]]; then
 fi
 printf '%s\n' "$*" >> "$log_file"
 case "${1:-}" in
+  --version)
+    printf 'jj 0.39.0\n'
+    ;;
   git)
     case "${2:-}" in
       init)
@@ -182,6 +209,26 @@ esac
 	oldPath := os.Getenv("PATH")
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath)
 	return logFile, committedFile
+}
+
+func prepareGitVersionShim(t *testing.T, version string) {
+	t.Helper()
+	binDir := filepath.Join(t.TempDir(), "git-bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("创建 fake git bin 失败: %v", err)
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("定位 git 失败: %v", err)
+	}
+	script := filepath.Join(binDir, "git")
+	body := "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then\n  printf '%s\\n' \"${FAKE_GIT_VERSION:?}\"\n  exit 0\nfi\nexec \"" + gitPath + "\" \"$@\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("写入 fake git 失败: %v", err)
+	}
+	t.Setenv("FAKE_GIT_VERSION", version)
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath)
 }
 
 func readCommands(t *testing.T, path string) []string {
