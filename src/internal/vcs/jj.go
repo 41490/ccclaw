@@ -12,10 +12,12 @@ import (
 )
 
 var (
-	ErrJJNotAvailable = errors.New("jj 未安装")
-	ErrConflict       = errors.New("jj rebase 产生冲突，需人工解决")
-	ErrPushFailed     = errors.New("jj git push 重试耗尽")
-	ErrGitTooOld      = errors.New("git 版本过低，不满足 jj 同步要求")
+	ErrJJNotAvailable     = errors.New("jj 未安装")
+	ErrCapabilityMismatch = errors.New("jj/git 能力不兼容")
+	ErrUnsupportedGit     = errors.New("git 缺少 jj 同步所需能力")
+	ErrConflict           = errors.New("jj rebase 产生冲突，需人工解决")
+	ErrPushFailed         = errors.New("jj git push 重试耗尽")
+	ErrGitTooOld          = errors.New("git 版本过低，不满足 jj 同步要求")
 )
 
 const (
@@ -25,6 +27,67 @@ const (
 	defaultRemote   = "origin"
 	minGitVersion   = "2.41.0"
 )
+
+type syncCapabilityProbe struct {
+	JJVersion           string
+	GitVersion          string
+	FetchPorcelain      bool
+	FetchHelpDiagnostic string
+}
+
+type SyncCapabilityError struct {
+	Reason     error
+	JJVersion  string
+	GitVersion string
+	Probe      string
+	Detail     string
+}
+
+func (e *SyncCapabilityError) Error() string {
+	if e == nil {
+		return ""
+	}
+	reason := ErrCapabilityMismatch.Error()
+	switch {
+	case errors.Is(e.Reason, ErrGitTooOld):
+		reason = ErrGitTooOld.Error()
+	case errors.Is(e.Reason, ErrUnsupportedGit):
+		reason = ErrUnsupportedGit.Error()
+	case errors.Is(e.Reason, ErrCapabilityMismatch):
+		reason = ErrCapabilityMismatch.Error()
+	}
+	parts := make([]string, 0, 5)
+	if strings.TrimSpace(e.GitVersion) != "" {
+		parts = append(parts, "当前 git="+strings.TrimSpace(e.GitVersion))
+	}
+	if strings.TrimSpace(e.JJVersion) != "" {
+		parts = append(parts, "jj="+strings.TrimSpace(e.JJVersion))
+	}
+	if strings.TrimSpace(e.Probe) != "" {
+		parts = append(parts, "探测项="+strings.TrimSpace(e.Probe))
+	}
+	if strings.TrimSpace(e.Detail) != "" {
+		parts = append(parts, strings.TrimSpace(e.Detail))
+	}
+	if len(parts) == 0 {
+		return reason
+	}
+	return reason + ": " + strings.Join(parts, "；")
+}
+
+func (e *SyncCapabilityError) Is(target error) bool {
+	if e == nil {
+		return target == nil
+	}
+	switch target {
+	case ErrCapabilityMismatch:
+		return true
+	case ErrUnsupportedGit:
+		return errors.Is(e.Reason, ErrUnsupportedGit) || errors.Is(e.Reason, ErrGitTooOld)
+	default:
+		return errors.Is(e.Reason, target)
+	}
+}
 
 // SyncRepo 使用 jj 在本地提交并尽力同步远端。
 func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
@@ -61,13 +124,17 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 		_, err := commitChanges(repoPath, message, normalizedPaths)
 		return err
 	}
-	if err := ensureSyncCapabilities(repoPath); err != nil {
+	probe, err := ensureSyncCapabilities()
+	if err != nil {
 		return err
 	}
 
 	var lastErr error
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		if err := runJJ(repoPath, "git", "fetch", "--remote", remote); err != nil {
+			if capabilityErr := classifyCapabilityMismatch(err, probe, "jj git fetch --remote "+remote); capabilityErr != nil {
+				return capabilityErr
+			}
 			lastErr = fmt.Errorf("拉取远端失败(第 %d/%d 次): %w", attempt, maxRetry, err)
 			continue
 		}
@@ -97,6 +164,9 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 			}
 		}
 		if err := runJJ(repoPath, "git", "push", "--remote", remote, "--bookmark", bookmark); err != nil {
+			if capabilityErr := classifyCapabilityMismatch(err, probe, "jj git push --remote "+remote+" --bookmark "+bookmark); capabilityErr != nil {
+				return capabilityErr
+			}
 			lastErr = fmt.Errorf("推送远端失败(第 %d/%d 次): %w", attempt, maxRetry, err)
 			continue
 		}
@@ -109,19 +179,117 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 	return fmt.Errorf("%w: %v", ErrPushFailed, lastErr)
 }
 
-func ensureSyncCapabilities(repoPath string) error {
+func ensureSyncCapabilities() (syncCapabilityProbe, error) {
+	probe, err := probeSyncCapabilities()
+	if err != nil {
+		return syncCapabilityProbe{}, err
+	}
+	if err := validateSyncCapabilities(probe); err != nil {
+		return syncCapabilityProbe{}, err
+	}
+	return probe, nil
+}
+
+func SyncCapabilityStatus() (string, error) {
+	probe, err := probeSyncCapabilities()
+	if err != nil {
+		return "", err
+	}
+	detail := fmt.Sprintf("jj=%s git=%s fetch_porcelain=%t", strings.TrimSpace(probe.JJVersion), strings.TrimSpace(probe.GitVersion), probe.FetchPorcelain)
+	if err := validateSyncCapabilities(probe); err != nil {
+		return detail, err
+	}
+	return detail, nil
+}
+
+func probeSyncCapabilities() (syncCapabilityProbe, error) {
 	jjVersion, err := runJJOutput("", "--version")
 	if err != nil {
-		return fmt.Errorf("读取 jj 版本失败: %w", err)
+		return syncCapabilityProbe{}, fmt.Errorf("读取 jj 版本失败: %w", err)
 	}
 	gitVersion, err := runGitOutput("", "--version")
 	if err != nil {
-		return fmt.Errorf("读取 git 版本失败: %w", err)
+		return syncCapabilityProbe{}, fmt.Errorf("读取 git 版本失败: %w", err)
 	}
-	gitVersion = strings.TrimSpace(gitVersion)
-	jjVersion = strings.TrimSpace(jjVersion)
-	if compareVersion(gitVersionNumber(gitVersion), minGitVersion) < 0 {
-		return fmt.Errorf("%w: 当前 git=%s，jj=%s；请升级 git 至 %s 及以上，或切换匹配的 jj 版本", ErrGitTooOld, gitVersion, jjVersion, minGitVersion)
+	fetchPorcelain, diagnostic, err := detectGitFetchPorcelainSupport()
+	if err != nil {
+		return syncCapabilityProbe{}, fmt.Errorf("探测 git fetch 帮助失败: %w", err)
+	}
+	return syncCapabilityProbe{
+		JJVersion:           strings.TrimSpace(jjVersion),
+		GitVersion:          strings.TrimSpace(gitVersion),
+		FetchPorcelain:      fetchPorcelain,
+		FetchHelpDiagnostic: diagnostic,
+	}, nil
+}
+
+func validateSyncCapabilities(probe syncCapabilityProbe) error {
+	if compareVersion(gitVersionNumber(probe.GitVersion), minGitVersion) < 0 {
+		return &SyncCapabilityError{
+			Reason:     ErrGitTooOld,
+			JJVersion:  probe.JJVersion,
+			GitVersion: probe.GitVersion,
+			Probe:      "git fetch --porcelain",
+			Detail:     fmt.Sprintf("缺少 `git fetch --porcelain` 能力；请升级 git 至 %s 及以上，或切换匹配的 jj 版本", minGitVersion),
+		}
+	}
+	if !probe.FetchPorcelain {
+		return &SyncCapabilityError{
+			Reason:     ErrUnsupportedGit,
+			JJVersion:  probe.JJVersion,
+			GitVersion: probe.GitVersion,
+			Probe:      "git fetch --porcelain",
+			Detail:     fmt.Sprintf("`git fetch -h` 未暴露 `--porcelain`；请升级 git 至 %s 及以上，或切换匹配的 jj 版本", minGitVersion),
+		}
+	}
+	return nil
+}
+
+func detectGitFetchPorcelainSupport() (bool, string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "fetch", "-h")
+	output, err := cmd.CombinedOutput()
+	text := strings.TrimSpace(string(output))
+	if ctx.Err() == context.DeadlineExceeded {
+		return false, text, errors.New("git fetch -h 执行超时")
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 129 {
+			if text == "" {
+				text = err.Error()
+			}
+			return false, text, fmt.Errorf("git fetch -h 执行失败: %s", text)
+		}
+	}
+	return strings.Contains(text, "--porcelain"), text, nil
+}
+
+func classifyCapabilityMismatch(err error, probe syncCapabilityProbe, command string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrCapabilityMismatch) || errors.Is(err, ErrUnsupportedGit) || errors.Is(err, ErrGitTooOld) {
+		return err
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"required option: porcelain",
+		"supported version is",
+		"git does not recognize required option",
+		"git fetch --porcelain",
+	} {
+		if strings.Contains(text, marker) {
+			return &SyncCapabilityError{
+				Reason:     ErrCapabilityMismatch,
+				JJVersion:  probe.JJVersion,
+				GitVersion: probe.GitVersion,
+				Probe:      command,
+				Detail:     strings.TrimSpace(err.Error()),
+			}
+		}
 	}
 	return nil
 }

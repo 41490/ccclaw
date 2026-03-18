@@ -689,7 +689,10 @@ func buildFinalizeHints(repo, localPath string, err error, class storage.Finaliz
 	if class == storage.FinalizeFailureClassVersionMismatch {
 		hints = append(hints,
 			"请先执行 `jj --version` 与 `git --version` 核对本机版本",
-			"若当前 git 低于 `2.41.0`，请优先升级 git，或切换匹配的 jj 版本后再重试",
+			"再执行 `git fetch -h | rg porcelain` 确认本机是否具备 `git fetch --porcelain` 能力",
+			"若当前 git 低于 `2.41.0` 或缺少 `--porcelain`，请优先升级 git，或切换匹配的 jj 版本后再重试",
+			"该类错误不会按网络抖动自动重试，请先处理环境兼容性后再恢复任务",
+			"可先执行 `ccclaw doctor`，确认 `jj/git 同步能力` 检查项是否已恢复为 `[ OK ]`",
 		)
 	}
 	if errors.Is(err, vcs.ErrConflict) {
@@ -1162,7 +1165,7 @@ func classifyFinalizeFailureClass(step string, err error) storage.FinalizeFailur
 	if errors.Is(err, vcs.ErrConflict) {
 		return storage.FinalizeFailureClassConflict
 	}
-	if errors.Is(err, vcs.ErrGitTooOld) {
+	if errors.Is(err, vcs.ErrGitTooOld) || errors.Is(err, vcs.ErrUnsupportedGit) || errors.Is(err, vcs.ErrCapabilityMismatch) {
 		return storage.FinalizeFailureClassVersionMismatch
 	}
 	if errors.Is(err, vcs.ErrJJNotAvailable) {
@@ -1248,7 +1251,7 @@ func isTransientFinalizeError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) || errors.Is(err, vcs.ErrGitTooOld) {
+	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) || errors.Is(err, vcs.ErrGitTooOld) || errors.Is(err, vcs.ErrUnsupportedGit) || errors.Is(err, vcs.ErrCapabilityMismatch) {
 		return false
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))

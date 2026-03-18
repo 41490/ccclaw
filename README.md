@@ -710,9 +710,10 @@ CLI 约定：
 调度排障建议路径：
 
 1. 先看 `ccclaw scheduler status`，确认请求模式与当前生效模式是否一致
-2. 再看 `ccclaw scheduler doctor`，确认 linger、user bus、unit 漂移、timer/service 最近状态
-3. 最后按需要选择 `ccclaw scheduler timers --wide|--raw|--json`
-4. 若 doctor 提示 service 异常，再执行 `ccclaw scheduler logs <scope>` 或 `journalctl --user -u <service>`
+2. 再看 `ccclaw doctor`，确认 `jj/git 同步能力` 是否通过；若失败，先执行 `jj --version`、`git --version`、`git fetch -h | rg porcelain`
+3. 再看 `ccclaw scheduler doctor`，确认 linger、user bus、unit 漂移、timer/service 最近状态
+4. 最后按需要选择 `ccclaw scheduler timers --wide|--raw|--json`
+5. 若 doctor 提示 service 异常，再执行 `ccclaw scheduler logs <scope>` 或 `journalctl --user -u <service>`
 
 脚本化观测建议：
 

@@ -1,6 +1,7 @@
 package vcs
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +109,51 @@ func TestSyncRepoFailsFastWhenGitVersionTooOld(t *testing.T) {
 	}
 }
 
+func TestSyncRepoFailsFastWhenGitMissingFetchPorcelainCapability(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	prepareGitVersionShim(t, "git version 2.41.0")
+	t.Setenv("FAKE_GIT_FETCH_HELP", "usage: git fetch [<options>]\n    --force           force overwrite\n")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrUnsupportedGit) {
+		t.Fatalf("expected unsupported-git error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "--porcelain") {
+		t.Fatalf("expected porcelain diagnostic, got %v", err)
+	}
+
+	commands := readCommands(t, logFile)
+	if containsCommand(commands, "git fetch --remote origin") {
+		t.Fatalf("缺少 porcelain 能力时不应继续 fetch，实际命令=%#v", commands)
+	}
+}
+
+func TestSyncRepoStopsRetryOnCapabilityMismatchFromJJ(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_FETCH_CAPABILITY_FAIL", "1")
+	prepareGitVersionShim(t, "git version 2.41.0")
+	t.Setenv("FAKE_GIT_FETCH_HELP", "usage: git fetch [<options>]\n    --porcelain      machine-readable output\n")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrCapabilityMismatch) {
+		t.Fatalf("expected capability-mismatch error, got %v", err)
+	}
+	if strings.Contains(err.Error(), ErrPushFailed.Error()) {
+		t.Fatalf("capability mismatch 不应被包装成 push failed: %v", err)
+	}
+
+	commands := readCommands(t, logFile)
+	if countCommands(commands, "git fetch --remote origin") != 1 {
+		t.Fatalf("capability mismatch 应在首轮 fetch 直接停止，实际命令=%#v", commands)
+	}
+}
+
 func initGitRepo(t *testing.T, withRemote bool) string {
 	t.Helper()
 	repoPath := t.TempDir()
@@ -166,6 +212,12 @@ case "${1:-}" in
         target="${@: -1}"
         mkdir -p "$target/.jj"
         ;;
+      fetch)
+        if [[ "${JJ_FETCH_CAPABILITY_FAIL:-0}" == "1" ]]; then
+          printf 'Error: Git does not recognize required option: porcelain (note: supported version is 2.41.0)\n' >&2
+          exit 1
+        fi
+        ;;
       push)
         state_file="${JJ_PUSH_STATE_FILE:-}"
         fail_until="${JJ_PUSH_FAIL_UNTIL:-0}"
@@ -222,7 +274,7 @@ func prepareGitVersionShim(t *testing.T, version string) {
 		t.Fatalf("定位 git 失败: %v", err)
 	}
 	script := filepath.Join(binDir, "git")
-	body := "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then\n  printf '%s\\n' \"${FAKE_GIT_VERSION:?}\"\n  exit 0\nfi\nexec \"" + gitPath + "\" \"$@\"\n"
+	body := "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"${1:-}\" == \"--version\" ]]; then\n  printf '%s\\n' \"${FAKE_GIT_VERSION:?}\"\n  exit 0\nfi\nif [[ \"${1:-}\" == \"fetch\" && \"${2:-}\" == \"-h\" ]]; then\n  if [[ -n \"${FAKE_GIT_FETCH_HELP:-}\" ]]; then\n    printf '%s' \"${FAKE_GIT_FETCH_HELP}\"\n  else\n    printf 'usage: git fetch [<options>]\\n    --porcelain      machine-readable output\\n'\n  fi\n  exit 129\nfi\nexec \"" + gitPath + "\" \"$@\"\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("写入 fake git 失败: %v", err)
 	}

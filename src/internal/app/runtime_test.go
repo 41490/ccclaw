@@ -1426,6 +1426,23 @@ func TestAssessFinalizeFailureVersionMismatchReturnsPause(t *testing.T) {
 	}
 }
 
+func TestAssessFinalizeFailureCapabilityMismatchReturnsPause(t *testing.T) {
+	err := &vcs.SyncCapabilityError{
+		Reason:     vcs.ErrUnsupportedGit,
+		JJVersion:  "jj 0.39.0",
+		GitVersion: "git version 2.41.0",
+		Probe:      "git fetch --porcelain",
+		Detail:     "缺少 `git fetch --porcelain` 能力",
+	}
+	assessment := assessFinalizeFailure("target", err)
+	if assessment.class != storage.FinalizeFailureClassVersionMismatch {
+		t.Fatalf("expected version_mismatch, got %s", assessment.class)
+	}
+	if assessment.policy.mode != finalizeFailurePause {
+		t.Fatalf("expected pause policy, got %+v", assessment.policy)
+	}
+}
+
 func TestReportFinalizeRecoveryPostsSingleRecoveryComment(t *testing.T) {
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "bin")

@@ -55,6 +55,7 @@ bash install.sh --remove-cron
 ## 安装后建议
 
 1. 运行 `~/.ccclaw/bin/ccclaw doctor`
+   - 若 `jj/git 同步能力` 失败，先执行 `jj --version`、`git --version`、`git fetch -h | rg porcelain`
 2. 检查本体仓库 / 任务仓库 配置是否符合预期
 3. 若体检结果为 `systemd`，且当前会话可直连 user bus，安装/升级会自动启用或重启 timer
 4. 若体检结果为 `systemd`，但当前会话无法直连 user bus，请在登录会话中手工执行 `systemctl --user daemon-reload && systemctl --user enable --now ...`
@@ -87,6 +88,7 @@ bash install.sh --remove-cron
 
 - `status --json` 提供整机运行态快照的结构化出口，适合巡检脚本直接消费
 - `scheduler status --json` 提供请求模式、生效模式、修复建议与 systemd/cron 原始探测字段
+- `doctor` 会额外检查 `jj/git` 同步能力，提前暴露 `git fetch --porcelain` 缺失这类环境兼容问题
 - `scheduler doctor` 会额外检查 linger、user bus、unit 漂移，以及最近失败的托管 service；`--json` 提供摘要与逐项检查结果
 - `scheduler timers` 默认只保留关键列；`--wide` 显示 `CAL_RAW/CAL_CFG` 与双时区时间；`--raw` 输出 key=value 原始字段；`--json` 提供结构化脚本视图
 - `[scheduler.logs].level` 会同时影响 `ingest/patrol/journal` 的运行态输出阈值，以及 `scheduler logs` 的默认查看过滤

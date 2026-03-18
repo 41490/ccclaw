@@ -1326,6 +1326,7 @@ func (rt *Runtime) Doctor(ctx context.Context, out io.Writer) error {
 		{name: "rg CLI", run: func() (string, error) { return commandVersion("rg", "--version") }},
 		{name: "duckdb CLI", run: func() (string, error) { return commandVersion("duckdb", "--version") }},
 		{name: "git CLI", run: func() (string, error) { return commandVersion("git", "--version") }},
+		{name: "jj/git 同步能力", run: vcs.SyncCapabilityStatus},
 		{name: "gh CLI", run: func() (string, error) { return commandVersion("gh", "--version") }},
 		{name: "GitHub 网络", run: func() (string, error) {
 			return "rate_limit", rt.clientForRepo(rt.cfg.GitHub.ControlRepo).NetworkCheck(ctx)

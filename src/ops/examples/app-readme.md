@@ -40,6 +40,7 @@ systemctl --user enable --now ccclaw-ingest.timer ccclaw-patrol.timer ccclaw-jou
 
 - 推荐排障顺序：
   - 先看 `scheduler status`
+  - 再看 `doctor`，确认 `jj/git 同步能力` 是否通过；若失败，先执行 `jj --version`、`git --version`、`git fetch -h | rg porcelain`
   - 再看 `scheduler doctor`
   - 再按需切到 `scheduler timers --wide|--raw|--json`
 - 如需脚本消费：
