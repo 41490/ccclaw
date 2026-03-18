@@ -56,3 +56,7 @@ bin/
 
 # Git worktrees（本地隔离工作区）
 .worktrees/
+
+# recall 运行时状态（不入库）
+src/dist/kb/context.md
+src/dist/kb/memory/nodes.jsonl
