@@ -59,8 +59,29 @@ func (r *Reporter) ReportSuccess(task *core.Task, duration time.Duration, logFil
 	if client == nil {
 		return nil, nil
 	}
-	body := fmt.Sprintf("任务执行完成。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 耗时: `%s`\n- 工程报告: `%s`\n- 日志: `%s`\n\n%s", task.IssueRepo, task.IssueNumber, task.State, duration.Round(time.Second), task.ReportPath, logFile, github.DoneMarker)
+	body := successBody(task, duration, logFile)
 	return client.AddComment(task.IssueNumber, body)
+}
+
+func (r *Reporter) ReportResultReady(task *core.Task, duration time.Duration, logFile string) (*github.Comment, error) {
+	client := r.client(task)
+	if client == nil {
+		return nil, nil
+	}
+	body := fmt.Sprintf("任务执行结果已形成，正在执行交付收尾。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 执行结果: `已产出`\n- 耗时: `%s`\n- 工程报告: `%s`\n- 日志: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, duration.Round(time.Second), task.ReportPath, logFile)
+	return client.AddComment(task.IssueNumber, body)
+}
+
+func (r *Reporter) PromoteResultToDone(task *core.Task, duration time.Duration, logFile string, commentID int64) (*github.Comment, error) {
+	client := r.client(task)
+	if client == nil {
+		return nil, nil
+	}
+	body := successBody(task, duration, logFile)
+	if commentID == 0 {
+		return client.AddComment(task.IssueNumber, body)
+	}
+	return client.UpdateComment(commentID, body)
 }
 
 func (r *Reporter) ReportStarted(task *core.Task, sessionName string) error {
@@ -132,6 +153,8 @@ func formatFinalizeStep(step string) string {
 		return "`sync_home`（知识仓同步）"
 	case "report_issue":
 		return "`report_issue`（Issue 回帖）"
+	case "mark_done":
+		return "`mark_done`（补齐 done marker）"
 	default:
 		return "`" + step + "`"
 	}
@@ -206,4 +229,8 @@ func classifyFailureStage(task *core.Task) string {
 		}
 	}
 	return "执行阶段"
+}
+
+func successBody(task *core.Task, duration time.Duration, logFile string) string {
+	return fmt.Sprintf("任务执行完成。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 耗时: `%s`\n- 工程报告: `%s`\n- 日志: `%s`\n\n%s", task.IssueRepo, task.IssueNumber, task.State, duration.Round(time.Second), task.ReportPath, logFile, github.DoneMarker)
 }

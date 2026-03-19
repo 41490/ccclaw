@@ -150,3 +150,100 @@ printf '{}\n'
 		t.Fatalf("expected done marker in %q", string(payload))
 	}
 }
+
+func TestReportResultReadyDoesNotAppendDoneMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$*" > "$CCCLAW_REPORTER_LOG"
+printf '{"id":701}'`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	rep := New(func(repo string) *github.Client {
+		return github.NewClient(repo, map[string]string{})
+	})
+	task := &core.Task{
+		IssueRepo:   "41490/ccclaw",
+		IssueNumber: 38,
+		State:       core.StateFinalizing,
+		ReportPath:  "docs/reports/260318_85_ready.md",
+	}
+	if _, err := rep.ReportResultReady(task, 3*time.Second, "/tmp/task.log"); err != nil {
+		t.Fatalf("ReportResultReady failed: %v", err)
+	}
+
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	text := string(payload)
+	if !strings.Contains(text, "任务执行结果已形成，正在执行交付收尾。") {
+		t.Fatalf("expected ready text in %q", text)
+	}
+	if strings.Contains(text, github.DoneMarker) {
+		t.Fatalf("ready comment should not append done marker: %q", text)
+	}
+}
+
+func TestPromoteResultToDoneUpdatesExistingComment(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$*" > "$CCCLAW_REPORTER_LOG"
+printf '{"id":701}'`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	rep := New(func(repo string) *github.Client {
+		return github.NewClient(repo, map[string]string{})
+	})
+	task := &core.Task{
+		IssueRepo:   "41490/ccclaw",
+		IssueNumber: 39,
+		State:       core.StateDone,
+		ReportPath:  "docs/reports/260318_85_done.md",
+	}
+	if _, err := rep.PromoteResultToDone(task, 2*time.Second, "/tmp/task.log", 701); err != nil {
+		t.Fatalf("PromoteResultToDone failed: %v", err)
+	}
+
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	text := string(payload)
+	for _, want := range []string{
+		"repos/41490/ccclaw/issues/comments/701",
+		"--method PATCH",
+		github.DoneMarker,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in %q", want, text)
+		}
+	}
+}

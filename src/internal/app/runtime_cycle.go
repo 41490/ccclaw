@@ -404,6 +404,7 @@ func (rt *Runtime) failTaskExecution(task *core.Task, result *executor.Result, r
 		if result != nil && strings.TrimSpace(result.ResumeSessionID) != "" {
 			existing.LastSessionID = ""
 		}
+		existing.ResultCommentID = 0
 		existing.DoneCommentID = 0
 		existing.RetryCount++
 		existing.ErrorMsg = formatExecutionFailure(runErr, result)
@@ -480,35 +481,30 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 	if err := rt.runFinalizeSteps(ctx, updated, result, slot); err != nil {
 		return err
 	}
-	if slot.SyncTarget != storage.FinalizeStepOK || slot.SyncHome != storage.FinalizeStepOK {
+	if slot.ReportIssue != storage.FinalizeStepOK || slot.SyncTarget != storage.FinalizeStepOK || slot.SyncHome != storage.FinalizeStepOK {
 		return nil
 	}
 	doneCommentID := updated.DoneCommentID
-	if slot.ReportIssue != storage.FinalizeStepOK {
-		if result != nil && rt.rep != nil {
-			slot.CurrentStep = "report_issue"
-			slot.LastAttemptAt = time.Now().UTC()
-			doneTask := *updated
-			doneTask.State = core.StateDone
-			if err := rt.reportFinalizeRecovery(updated, slot); err != nil {
-				rt.logError("finalize", "回帖收尾恢复说明失败", "task_id", updated.TaskID, "error", err)
-			}
-			comment := rt.reportSuccess(&doneTask, result.Duration, result.LogFile)
-			if comment == nil || comment.ID == 0 {
-				slot.ReportIssue = storage.FinalizeStepFailed
-				return rt.handleFinalizeFailure(updated, slot, "report_issue", errors.New("Issue 完成回帖失败"), []string{
-					"请检查 GitHub Issue 评论权限与网络可达性",
-					"确认 `gh auth status` 正常",
-					"处理完成后重新执行一轮 ingest 补齐回帖",
-				})
-			}
-			doneCommentID = comment.ID
-		}
-		slot.ReportIssue = storage.FinalizeStepOK
-		markFinalizeStepDone(slot, "report_issue")
+	if result != nil && rt.rep != nil && doneCommentID == 0 {
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "mark_done")
+		slot.LastAttemptAt = time.Now().UTC()
 		if err := rt.store.UpsertRepoSlot(slot); err != nil {
 			return err
 		}
+		doneTask := *updated
+		doneTask.State = core.StateDone
+		if err := rt.reportFinalizeRecovery(updated, slot); err != nil {
+			rt.logError("finalize", "回帖收尾恢复说明失败", "task_id", updated.TaskID, "error", err)
+		}
+		comment := rt.promoteResultCommentToDone(&doneTask, result.Duration, result.LogFile, updated.ResultCommentID)
+		if comment == nil || comment.ID == 0 {
+			return rt.handleFinalizeFailure(updated, slot, "mark_done", errors.New("Issue 完成回帖失败"), []string{
+				"请检查 GitHub Issue 评论权限与网络可达性",
+				"确认 `gh auth status` 正常",
+				"处理完成后重新执行一轮 ingest 补齐 done marker",
+			})
+		}
+		doneCommentID = comment.ID
 	}
 	if _, err := rt.store.ApplyTask(updated.TaskID, func(existing *core.Task) (*core.Task, error) {
 		if existing == nil {
@@ -516,6 +512,7 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 		}
 		existing.State = core.StateDone
 		existing.ErrorMsg = ""
+		existing.ResultCommentID = doneCommentID
 		existing.DoneCommentID = doneCommentID
 		return existing, nil
 	}); err != nil {
@@ -548,9 +545,41 @@ func (rt *Runtime) reportFinalizeRecovery(task *core.Task, slot *storage.RepoSlo
 
 func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result *executor.Result, slot *storage.RepoSlot) error {
 	_ = ctx
-	_ = result
 	if task == nil || slot == nil {
 		return nil
+	}
+	if slot.ReportIssue != storage.FinalizeStepOK {
+		prepareFinalizeAttempt(slot, "report_issue")
+		if err := rt.store.UpsertRepoSlot(slot); err != nil {
+			return err
+		}
+		if result != nil && rt.rep != nil {
+			comment := rt.reportResultReady(task, result.Duration, result.LogFile)
+			if comment == nil || comment.ID == 0 {
+				slot.ReportIssue = storage.FinalizeStepFailed
+				return rt.handleFinalizeFailure(task, slot, "report_issue", errors.New("Issue 首轮结果回帖失败"), []string{
+					"请检查 GitHub Issue 评论权限与网络可达性",
+					"确认 `gh auth status` 正常",
+					"处理完成后重新执行一轮 ingest 补齐首条可见回帖",
+				})
+			}
+			task.ResultCommentID = comment.ID
+			if _, err := rt.store.ApplyTask(task.TaskID, func(existing *core.Task) (*core.Task, error) {
+				if existing == nil {
+					return nil, nil
+				}
+				existing.ResultCommentID = comment.ID
+				return existing, nil
+			}); err != nil {
+				return err
+			}
+		}
+		slot.ReportIssue = storage.FinalizeStepOK
+		markFinalizeStepDone(slot, "report_issue")
+		if err := rt.store.UpsertRepoSlot(slot); err != nil {
+			return err
+		}
+		_ = rt.store.AppendEvent(task.TaskID, core.EventUpdated, "Issue 首条结果回帖已发布，进入交付收尾")
 	}
 	if slot.SyncTarget != storage.FinalizeStepOK {
 		prepareFinalizeAttempt(slot, "sync_target")
@@ -570,12 +599,7 @@ func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result
 		}
 		markFinalizeStepDone(slot, "sync_home")
 	}
-	if slot.ReportIssue == storage.FinalizeStepOK {
-		return nil
-	}
-	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "report_issue")
-	slot.ReportIssue = storage.FinalizeStepPending
-	return rt.store.UpsertRepoSlot(slot)
+	return nil
 }
 
 func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot, step string, err error, hints []string) error {
@@ -1076,11 +1100,13 @@ func markFinalizeStepDone(slot *storage.RepoSlot, completedStep string) {
 		slot.FinalizeRetryCount = 0
 	}
 	switch strings.TrimSpace(completedStep) {
+	case "report_issue":
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "sync_target")
 	case "sync_target":
 		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "sync_home")
 	case "sync_home":
-		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "report_issue")
-	case "report_issue":
+		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "mark_done")
+	case "mark_done":
 		advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizing, "done")
 	}
 }
@@ -1092,13 +1118,16 @@ func finalizeCurrentStep(slot *storage.RepoSlot) string {
 	if step := strings.TrimSpace(slot.CurrentStep); step != "" {
 		return step
 	}
+	if slot.ReportIssue != storage.FinalizeStepOK {
+		return "report_issue"
+	}
 	if slot.SyncTarget != storage.FinalizeStepOK {
 		return "sync_target"
 	}
 	if slot.SyncHome != storage.FinalizeStepOK {
 		return "sync_home"
 	}
-	return "report_issue"
+	return "mark_done"
 }
 
 func finalizeStepName(step string) string {
@@ -1109,6 +1138,8 @@ func finalizeStepName(step string) string {
 		return "sync_home"
 	case "report_issue":
 		return "report_issue"
+	case "mark_done":
+		return "mark_done"
 	default:
 		return strings.TrimSpace(step)
 	}
@@ -1156,7 +1187,7 @@ func assessFinalizeFailure(step string, err error) finalizeFailureAssessment {
 }
 
 func classifyFinalizeFailureClass(step string, err error) storage.FinalizeFailureClass {
-	if strings.TrimSpace(step) == "report_issue" {
+	if strings.TrimSpace(step) == "report_issue" || strings.TrimSpace(step) == "mark_done" {
 		return storage.FinalizeFailureClassIssueReporting
 	}
 	if err == nil {

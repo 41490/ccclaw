@@ -1415,6 +1415,207 @@ printf '{}\n'
 	}
 }
 
+func TestCompleteTaskFinalizingPostsVisibleCommentBeforeSyncFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$*" >> "$CCCLAW_REPORTER_LOG"
+printf '{"id":701}
+'`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         core.TaskID("41490/ccclaw", 85),
+		IdempotencyKey: core.IdempotencyKey("41490/ccclaw", 85),
+		ControlRepo:    "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    85,
+		IssueTitle:     "visible finalize",
+		State:          core.StateRunning,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths:  config.PathsConfig{VarDir: varDir, KBDir: "/opt/ccclaw/kb"},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: filepath.Join(tmpDir, "target"),
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store: store,
+		rep: reporter.New(func(repo string) *github.Client {
+			return github.NewClient(repo, map[string]string{})
+		}),
+		syncRepo: func(repoPath, message string, paths []string, maxRetry int) error {
+			return errors.New("context deadline exceeded")
+		},
+	}
+
+	result := &executor.Result{Duration: 5 * time.Second, LogFile: "/tmp/task.log"}
+	if err := rt.completeTaskFinalizing(context.Background(), task, result, nil); err != nil {
+		t.Fatalf("completeTaskFinalizing 失败: %v", err)
+	}
+
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	logText := string(payload)
+	if strings.Count(logText, "repos/41490/ccclaw/issues/85/comments") != 2 {
+		t.Fatalf("预期两次 issue 评论调用，实际为 %q", logText)
+	}
+	readyIdx := strings.Index(logText, "任务执行结果已形成，正在执行交付收尾。")
+	failIdx := strings.Index(logText, "任务执行已完成，但交付收尾失败。")
+	if readyIdx < 0 || failIdx < 0 || readyIdx >= failIdx {
+		t.Fatalf("预期先发可见回帖再发失败说明，实际为 %q", logText)
+	}
+	if readySection := logText[readyIdx:failIdx]; strings.Contains(readySection, github.DoneMarker) {
+		t.Fatalf("首条可见回帖不应带 done marker: %q", readySection)
+	}
+
+	loaded, err := store.GetTask(task.TaskID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateFinalizing || loaded.ResultCommentID != 701 || loaded.DoneCommentID != 0 {
+		t.Fatalf("unexpected task after finalize failure: %#v", loaded)
+	}
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取仓位失败: %v", err)
+	}
+	if slot == nil || slot.ReportIssue != storage.FinalizeStepOK || slot.SyncTarget != storage.FinalizeStepFailed || slot.CurrentStep != "sync_target" {
+		t.Fatalf("unexpected slot after finalize failure: %#v", slot)
+	}
+}
+
+func TestCompleteTaskFinalizingPromotesVisibleCommentToDoneWithoutSecondPost(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$*" >> "$CCCLAW_REPORTER_LOG"
+printf '{"id":701}
+'`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         core.TaskID("41490/ccclaw", 86),
+		IdempotencyKey: core.IdempotencyKey("41490/ccclaw", 86),
+		ControlRepo:    "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    86,
+		IssueTitle:     "promote done marker",
+		State:          core.StateRunning,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths:  config.PathsConfig{VarDir: varDir, KBDir: "/opt/ccclaw/kb"},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: filepath.Join(tmpDir, "target"),
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store: store,
+		rep: reporter.New(func(repo string) *github.Client {
+			return github.NewClient(repo, map[string]string{})
+		}),
+		syncRepo: func(repoPath, message string, paths []string, maxRetry int) error {
+			return nil
+		},
+	}
+
+	result := &executor.Result{Duration: 6 * time.Second, LogFile: "/tmp/task.log"}
+	if err := rt.completeTaskFinalizing(context.Background(), task, result, nil); err != nil {
+		t.Fatalf("completeTaskFinalizing 失败: %v", err)
+	}
+
+	payload, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("读取 gh 日志失败: %v", err)
+	}
+	logText := string(payload)
+	if strings.Count(logText, "repos/41490/ccclaw/issues/86/comments") != 1 {
+		t.Fatalf("成功路径只应创建一次 issue 评论，实际为 %q", logText)
+	}
+	if strings.Count(logText, "repos/41490/ccclaw/issues/comments/701") != 1 || !strings.Contains(logText, "--method PATCH") {
+		t.Fatalf("成功路径应通过 PATCH 补齐 done marker，实际为 %q", logText)
+	}
+	readyIdx := strings.Index(logText, "任务执行结果已形成，正在执行交付收尾。")
+	doneIdx := strings.Index(logText, github.DoneMarker)
+	if readyIdx < 0 || doneIdx < 0 || readyIdx >= doneIdx {
+		t.Fatalf("预期先发可见回帖，再补 done marker，实际为 %q", logText)
+	}
+	if readySection := logText[readyIdx:doneIdx]; strings.Contains(readySection, github.DoneMarker) {
+		t.Fatalf("首条可见回帖不应带 done marker: %q", readySection)
+	}
+
+	loaded, err := store.GetTask(task.TaskID)
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if loaded == nil || loaded.State != core.StateDone || loaded.ResultCommentID != 701 || loaded.DoneCommentID != 701 {
+		t.Fatalf("unexpected task after finalize success: %#v", loaded)
+	}
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取仓位失败: %v", err)
+	}
+	if slot != nil {
+		t.Fatalf("成功收尾后仓位应被删除，实际为 %#v", slot)
+	}
+}
+
 func TestAssessFinalizeFailureVersionMismatchReturnsPause(t *testing.T) {
 	err := fmt.Errorf("%w: 当前 git=git version 2.39.5，jj=jj 0.39.0；请升级 git 至 2.41.0 及以上，或切换匹配的 jj 版本", vcs.ErrGitTooOld)
 	assessment := assessFinalizeFailure("target", err)

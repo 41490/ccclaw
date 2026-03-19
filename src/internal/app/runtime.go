@@ -1869,6 +1869,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 			task.LastSessionID = ""
 			_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, fmt.Sprintf("恢复 session %s 失败，后续重试将降级为新执行", resumeSessionID))
 		}
+		task.ResultCommentID = 0
 		task.DoneCommentID = 0
 		task.RetryCount++
 		task.ErrorMsg = formatExecutionFailure(runErr, result)
@@ -1900,6 +1901,7 @@ func (rt *Runtime) finishTaskExecution(task *core.Task, result *executor.Result,
 	}
 	if result != nil {
 		if comment := rt.reportSuccess(task, result.Duration, result.LogFile); comment != nil && comment.ID != 0 {
+			task.ResultCommentID = comment.ID
 			task.DoneCommentID = comment.ID
 			if err := rt.store.UpsertTask(task); err != nil {
 				return err
@@ -2071,6 +2073,22 @@ func (rt *Runtime) reportSuccess(task *core.Task, duration time.Duration, logFil
 		return nil
 	}
 	comment, _ := rt.rep.ReportSuccess(task, duration, logFile)
+	return comment
+}
+
+func (rt *Runtime) reportResultReady(task *core.Task, duration time.Duration, logFile string) *github.Comment {
+	if rt.rep == nil {
+		return nil
+	}
+	comment, _ := rt.rep.ReportResultReady(task, duration, logFile)
+	return comment
+}
+
+func (rt *Runtime) promoteResultCommentToDone(task *core.Task, duration time.Duration, logFile string, commentID int64) *github.Comment {
+	if rt.rep == nil {
+		return nil
+	}
+	comment, _ := rt.rep.PromoteResultToDone(task, duration, logFile, commentID)
 	return comment
 }
 

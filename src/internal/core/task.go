@@ -66,6 +66,7 @@ type Task struct {
 	IssueRepo             string
 	TargetRepo            string
 	LastSessionID         string
+	ResultCommentID       int64
 	DoneCommentID         int64
 	IssueNumber           int
 	IssueTitle            string

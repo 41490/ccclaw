@@ -24,17 +24,17 @@ type User struct {
 }
 
 type Issue struct {
-	Repo      string    `json:"-"`
-	Number    int       `json:"number"`
-	Title     string    `json:"title"`
-	Body      string    `json:"body"`
+	Repo        string    `json:"-"`
+	Number      int       `json:"number"`
+	Title       string    `json:"title"`
+	Body        string    `json:"body"`
 	State       string    `json:"state"`
 	StateReason string    `json:"state_reason,omitempty"`
 	Labels      []Label   `json:"labels"`
-	User      User      `json:"user"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	PullReq   any       `json:"pull_request,omitempty"`
+	User        User      `json:"user"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	PullReq     any       `json:"pull_request,omitempty"`
 }
 
 type Comment struct {
@@ -124,6 +124,18 @@ func (c *Client) AddComment(number int, body string) (*Comment, error) {
 	var comment Comment
 	if err := json.Unmarshal(out, &comment); err != nil {
 		return nil, fmt.Errorf("解析 issue 评论回写结果失败: %w", err)
+	}
+	return &comment, nil
+}
+
+func (c *Client) UpdateComment(commentID int64, body string) (*Comment, error) {
+	out, err := c.runGH(context.Background(), "api", fmt.Sprintf("repos/%s/issues/comments/%d", c.repo, commentID), "--method", "PATCH", "-f", "body="+body)
+	if err != nil {
+		return nil, fmt.Errorf("更新 issue 评论失败: %w", err)
+	}
+	var comment Comment
+	if err := json.Unmarshal(out, &comment); err != nil {
+		return nil, fmt.Errorf("解析 issue 评论更新结果失败: %w", err)
 	}
 	return &comment, nil
 }
