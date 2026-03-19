@@ -31,9 +31,9 @@ func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOn
 		return err
 	}
 	if dispatchOnly {
-		return rt.dispatchNextByRepo(ctx, out, advanced)
+		return rt.dispatchNextSingleFlight(ctx, out, advanced)
 	}
-	return rt.dispatchNextByRepo(ctx, out, advanced)
+	return rt.dispatchNextSingleFlight(ctx, out, advanced)
 }
 
 func (rt *Runtime) advanceRepoSlots(ctx context.Context) (map[string]struct{}, error) {
@@ -175,40 +175,39 @@ func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *s
 	return nil
 }
 
-func (rt *Runtime) dispatchNextByRepo(ctx context.Context, out io.Writer, skipRepos map[string]struct{}) error {
-	grouped, err := rt.store.ListRunnableByTarget(1)
+func (rt *Runtime) dispatchNextSingleFlight(ctx context.Context, out io.Writer, _ map[string]struct{}) error {
+	slots, err := rt.store.ListRepoSlots()
 	if err != nil {
 		return err
 	}
-	targets := rt.cfg.EnabledTargets()
-	dispatched := 0
-	for idx := range targets {
-		target := &targets[idx]
-		if _, skipped := skipRepos[target.Repo]; skipped {
+	if len(slots) > 0 {
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "当前已有 %d 个活动槽位，本轮保持全局单飞串行\n", len(slots))
+		}
+		return nil
+	}
+	runnable, err := rt.store.ListRunnable(0)
+	if err != nil {
+		return err
+	}
+	for _, task := range runnable {
+		if task == nil || strings.TrimSpace(task.TargetRepo) == "" {
 			continue
 		}
-		slot, err := rt.store.GetRepoSlot(target.Repo)
+		target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
 		if err != nil {
 			return err
 		}
-		if slot != nil && slot.Phase != "" {
-			continue
-		}
-		queue := grouped[target.Repo]
-		if len(queue) == 0 {
-			continue
-		}
-		if err := rt.dispatchTask(ctx, queue[0], target); err != nil {
+		if err := rt.dispatchTask(ctx, task, target); err != nil {
 			return err
 		}
-		dispatched++
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "本轮已发射 1 个任务，继续保持全局单飞串行\n")
+		}
+		return nil
 	}
 	if out != nil {
-		if dispatched == 0 {
-			_, _ = fmt.Fprintln(out, "暂无可发射任务")
-		} else {
-			_, _ = fmt.Fprintf(out, "本轮已发射 %d 个仓库槽位任务\n", dispatched)
-		}
+		_, _ = fmt.Fprintln(out, "暂无可发射任务")
 	}
 	return nil
 }

@@ -675,7 +675,7 @@ func TestRunCommandLogLevelOverride(t *testing.T) {
 	if !strings.Contains(stdout.String(), "暂无可发射任务") {
 		t.Fatalf("expected run stdout: %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "兼容入口已转发到按仓 ingest 调度") {
+	if !strings.Contains(stderr.String(), "兼容入口已转发到全局单飞 ingest 调度") {
 		t.Fatalf("expected runtime info log on stderr: %q", stderr.String())
 	}
 
@@ -692,7 +692,7 @@ func TestRunCommandLogLevelOverride(t *testing.T) {
 	if !strings.Contains(stdout.String(), "暂无可发射任务") {
 		t.Fatalf("expected run stdout: %q", stdout.String())
 	}
-	if strings.Contains(stderr.String(), "兼容入口已转发到按仓 ingest 调度") {
+	if strings.Contains(stderr.String(), "兼容入口已转发到全局单飞 ingest 调度") {
 		t.Fatalf("warning level should suppress runtime info log: %q", stderr.String())
 	}
 }

@@ -185,13 +185,13 @@ func (rt *Runtime) Ingest(ctx context.Context) error {
 		}
 		revisited++
 	}
-	rt.logInfo("ingest", "同步完成，准备执行按仓调度循环", "visible_tasks", len(seen), "revisited", revisited)
+	rt.logInfo("ingest", "同步完成，准备执行全局单飞调度循环", "visible_tasks", len(seen), "revisited", revisited)
 	return rt.runIngestCycle(ctx, nil, false)
 }
 
 func (rt *Runtime) Run(ctx context.Context, out io.Writer, limit int) error {
 	defer rt.store.Close()
-	rt.logInfo("run", "兼容入口已转发到按仓 ingest 调度", "limit", limit)
+	rt.logInfo("run", "兼容入口已转发到全局单飞 ingest 调度", "limit", limit)
 	return rt.runIngestCycle(ctx, out, true)
 }
 

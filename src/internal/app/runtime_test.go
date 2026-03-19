@@ -3018,3 +3018,135 @@ printf '%s\n' '{"event":"result","timestamp":"2026-03-13T20:00:02Z","session_id"
 		t.Fatalf("预期 daemon 模式无需 tmux 巡查槽位，实际为 %#v", slot)
 	}
 }
+
+func TestRunIngestCycleSingleFlightAcrossTargets(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("PATH", tmpDir)
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	createdAt := time.Date(2026, 3, 19, 15, 30, 0, 0, time.UTC)
+	first := &core.Task{
+		TaskID:         "87#body",
+		IdempotencyKey: "87#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/repo-a",
+		IssueRepo:      "41490/ccclaw",
+		IssueNumber:    87,
+		IssueTitle:     "first task",
+		IssueBody:      "target_repo: 41490/repo-a",
+		IssueAuthor:    "ZoomQuiet",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateNew,
+		CreatedAt:      createdAt,
+		UpdatedAt:      createdAt,
+	}
+	second := &core.Task{
+		TaskID:         "88#body",
+		IdempotencyKey: "88#body",
+		ControlRepo:    "41490/ccclaw",
+		TargetRepo:     "41490/repo-b",
+		IssueRepo:      "41490/ccclaw",
+		IssueNumber:    88,
+		IssueTitle:     "second task",
+		IssueBody:      "target_repo: 41490/repo-b",
+		IssueAuthor:    "ZoomQuiet",
+		Labels:         []string{"ccclaw"},
+		Intent:         core.IntentFix,
+		RiskLevel:      core.RiskLow,
+		State:          core.StateNew,
+		CreatedAt:      createdAt.Add(time.Minute),
+		UpdatedAt:      createdAt.Add(time.Minute),
+	}
+	if err := store.UpsertTask(first); err != nil {
+		t.Fatalf("写入首个任务失败: %v", err)
+	}
+	if err := store.UpsertTask(second); err != nil {
+		t.Fatalf("写入第二个任务失败: %v", err)
+	}
+
+	targetA := filepath.Join(tmpDir, "repo-a")
+	targetB := filepath.Join(tmpDir, "repo-b")
+	if err := os.MkdirAll(targetA, 0o755); err != nil {
+		t.Fatalf("创建 repo-a 目录失败: %v", err)
+	}
+	if err := os.MkdirAll(targetB, 0o755); err != nil {
+		t.Fatalf("创建 repo-b 目录失败: %v", err)
+	}
+	execScript := filepath.Join(tmpDir, "fake-stream.sh")
+	stream := `#!/bin/sh
+printf '%s\n' '{"event":"started","timestamp":"2026-03-19T15:30:00Z","session_id":"sess-single-flight","message":"start","step":"execute"}'
+printf '%s\n' '{"event":"result","timestamp":"2026-03-19T15:30:02Z","session_id":"sess-single-flight","result":"single-flight done","total_cost_usd":0.21,"usage":{"input_tokens":30,"output_tokens":12}}'
+`
+	if err := os.WriteFile(execScript, []byte(stream), 0o755); err != nil {
+		t.Fatalf("写入执行脚本失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			Paths: config.PathsConfig{
+				AppDir: filepath.Join(tmpDir, "app"),
+				LogDir: filepath.Join(tmpDir, "log"),
+				VarDir: varDir,
+				KBDir:  "/opt/ccclaw/kb",
+			},
+			Executor: config.ExecutorConfig{
+				Command: []string{execScript},
+				Timeout: "30m",
+				Mode:    string(config.ExecutorModeDaemon),
+			},
+			Targets: []config.TargetConfig{
+				{
+					Repo:         "41490/repo-a",
+					LocalPath:    targetA,
+					KBPath:       "/opt/ccclaw/kb",
+					ExecutorMode: string(config.ExecutorModeDaemon),
+				},
+				{
+					Repo:         "41490/repo-b",
+					LocalPath:    targetB,
+					KBPath:       "/opt/ccclaw/kb",
+					ExecutorMode: string(config.ExecutorModeDaemon),
+				},
+			},
+		},
+		secrets: &config.Secrets{Values: map[string]string{}},
+		store:   store,
+	}
+	rt.syncRepo = func(repoPath, message string, paths []string, maxRetry int) error { return nil }
+
+	if err := rt.runIngestCycle(context.Background(), nil, false); err != nil {
+		t.Fatalf("执行首轮 ingest cycle 失败: %v", err)
+	}
+	firstLoaded, err := store.GetTask(first.TaskID)
+	if err != nil {
+		t.Fatalf("读取首个任务失败: %v", err)
+	}
+	secondLoaded, err := store.GetTask(second.TaskID)
+	if err != nil {
+		t.Fatalf("读取第二个任务失败: %v", err)
+	}
+	if firstLoaded == nil || firstLoaded.State != core.StateDone {
+		t.Fatalf("预期首个任务首轮完成，实际为 %#v", firstLoaded)
+	}
+	if secondLoaded == nil || secondLoaded.State != core.StateNew {
+		t.Fatalf("预期第二个任务仍等待下一轮发射，实际为 %#v", secondLoaded)
+	}
+
+	if err := rt.runIngestCycle(context.Background(), nil, false); err != nil {
+		t.Fatalf("执行第二轮 ingest cycle 失败: %v", err)
+	}
+	secondLoaded, err = store.GetTask(second.TaskID)
+	if err != nil {
+		t.Fatalf("再次读取第二个任务失败: %v", err)
+	}
+	if secondLoaded == nil || secondLoaded.State != core.StateDone {
+		t.Fatalf("预期第二个任务在下一轮完成，实际为 %#v", secondLoaded)
+	}
+}

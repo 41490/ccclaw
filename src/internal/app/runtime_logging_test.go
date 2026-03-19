@@ -52,14 +52,14 @@ func TestRunLogsRespectRuntimeLevel(t *testing.T) {
 	infoLogs := runRuntimeLoggingEntry(t, "info", func(rt *Runtime, out *bytes.Buffer) error {
 		return rt.Run(context.Background(), out, 10)
 	})
-	if !strings.Contains(infoLogs, "兼容入口已转发到按仓 ingest 调度") {
+	if !strings.Contains(infoLogs, "兼容入口已转发到全局单飞 ingest 调度") {
 		t.Fatalf("expected run info log, got %q", infoLogs)
 	}
 
 	warningLogs := runRuntimeLoggingEntry(t, "warning", func(rt *Runtime, out *bytes.Buffer) error {
 		return rt.Run(context.Background(), out, 10)
 	})
-	if strings.Contains(warningLogs, "兼容入口已转发到按仓 ingest 调度") {
+	if strings.Contains(warningLogs, "兼容入口已转发到全局单飞 ingest 调度") {
 		t.Fatalf("warning level should suppress run info log: %q", warningLogs)
 	}
 }

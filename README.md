@@ -663,7 +663,7 @@ ccclaw config set-scheduler --mode auto|systemd|cron|none  # 更新调度器配�
 
 # 任务流
 ccclaw ingest                   # 拉取并入队 Issue 任务
-ccclaw run                      # 兼容入口，内部转发到按仓 ingest 调度
+ccclaw run                      # 兼容入口，内部转发到全局单飞 ingest 调度
 ccclaw --log-level debug run    # 临时放大兼容入口本次运行态日志密度
 
 # 运行态观测
