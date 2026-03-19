@@ -665,6 +665,7 @@ type statusRepoSlotItem struct {
 	Phase              string `json:"phase"`
 	CurrentStep        string `json:"current_step,omitempty"`
 	FailureClass       string `json:"failure_class,omitempty"`
+	FailureMode        string `json:"failure_mode,omitempty"`
 	RestartCount       int    `json:"restart_count"`
 	FinalizeRetryStep  string `json:"finalize_retry_step,omitempty"`
 	FinalizeRetryCount int    `json:"finalize_retry_count"`
@@ -879,6 +880,7 @@ func (rt *Runtime) collectStatusRepoSlots() (statusRepoSlotSnapshot, error) {
 			Phase:              phase,
 			CurrentStep:        slot.CurrentStep,
 			FailureClass:       string(slot.FailureClass),
+			FailureMode:        string(slot.FailureMode),
 			RestartCount:       slot.RestartCount,
 			FinalizeRetryStep:  slot.FinalizeRetryStep,
 			FinalizeRetryCount: slot.FinalizeRetryCount,
@@ -1056,7 +1058,7 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 		}
 		_, _ = fmt.Fprintln(out)
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "TARGET\tMODE\tPHASE\tSTEP\tCLASS\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
+		_, _ = fmt.Fprintln(w, "TARGET\tMODE\tPHASE\tSTEP\tCLASS\tMODE_HINT\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
 		for _, item := range snapshot.Slots.Items {
 			nextRetry := item.NextRetryAt
 			if nextRetry == "" {
@@ -1066,12 +1068,13 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 			if lastError == "" {
 				lastError = "-"
 			}
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
 				item.TargetRepo,
 				emptyStatusValue(item.ExecutorMode),
 				item.Phase,
 				emptyStatusValue(item.CurrentStep),
 				emptyStatusValue(item.FailureClass),
+				emptyStatusValue(item.FailureMode),
 				item.RestartCount,
 				emptyStatusValue(item.FinalizeRetryStep),
 				item.FinalizeRetryCount,

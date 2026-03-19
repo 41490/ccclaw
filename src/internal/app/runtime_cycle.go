@@ -25,13 +25,6 @@ const (
 	maxFinalizeRetry         = 4
 )
 
-type finalizeFailureMode string
-
-const (
-	finalizeFailureRetry finalizeFailureMode = "retry"
-	finalizeFailurePause finalizeFailureMode = "pause"
-)
-
 func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOnly bool) error {
 	advanced, err := rt.advanceRepoSlots(ctx)
 	if err != nil {
@@ -611,6 +604,7 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 	advanceRepoSlotPhase(slot, storage.RepoSlotPhaseFinalizeFailed, finalizeStepName(step))
 	slot.LastError = strings.TrimSpace(err.Error())
 	slot.FailureClass = assessment.class
+	slot.FailureMode = assessment.policy.mode
 	slot.Hints = append([]string(nil), hints...)
 	slot.LastAttemptAt = now
 	stepName := finalizeStepName(step)
@@ -621,14 +615,15 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 		slot.FinalizeRetryCount = 0
 	}
 	slot.FinalizeRetryCount++
-	if policy.mode == finalizeFailureRetry && slot.FinalizeRetryCount > maxFinalizeRetry {
+	if policy.mode == storage.FinalizeFailureModeRetry && slot.FinalizeRetryCount > maxFinalizeRetry {
 		slot.Hints = append(slot.Hints, "临时重试次数已耗尽，后续请按建议手工处理")
-		policy.mode = finalizeFailurePause
+		policy.mode = storage.FinalizeFailureModePause
 		policy.delay = finalizeRetryManualDelay
+		slot.FailureMode = policy.mode
 	}
 	slot.NextRetryAt = now.Add(policy.nextDelay(slot.FinalizeRetryCount))
 	switch policy.mode {
-	case finalizeFailureRetry:
+	case storage.FinalizeFailureModeRetry:
 		slot.Hints = append(slot.Hints,
 			fmt.Sprintf("检测为临时抖动，系统将在 `%s` 后自动重试；当前已重试 `%d/%d`", policy.nextDelay(slot.FinalizeRetryCount).Round(time.Minute), slot.FinalizeRetryCount, maxFinalizeRetry),
 			fmt.Sprintf("下次自动重试时间: `%s`", slot.NextRetryAt.Format(time.RFC3339)),
@@ -650,9 +645,9 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 		existing.ErrorMsg = slot.LastError
 		return existing, nil
 	})
-	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, buildFinalizeFailureEventDetail(step, slot.FailureClass, slot.LastError))
+	_ = rt.store.AppendEvent(task.TaskID, core.EventWarning, buildFinalizeFailureEventDetail(step, slot.FailureClass, slot.FailureMode, slot.LastError))
 	if rt.rep != nil && slot.LastError != "" && shouldReportFinalizeFailure(slot, failureKey, shouldEnsureVisibleReport) {
-		_ = rt.rep.ReportFinalizing(task, step, slot.FailureClass, slot.LastError, slot.Hints)
+		_ = rt.rep.ReportFinalizing(task, step, slot.FailureClass, slot.FailureMode, slot.LastError, slot.Hints)
 		slot.LastReportedAt = now
 		slot.LastReportedFailure = failureKey
 		_ = rt.store.UpsertRepoSlot(slot)
@@ -704,13 +699,14 @@ func finalizeFailureState(err error) storage.FinalizeStepState {
 }
 
 func buildFinalizeHints(repo, localPath string, err error, class storage.FinalizeFailureClass) []string {
-	hints := []string{
-		fmt.Sprintf("本机仓库路径: `%s`", localPath),
-		"建议先执行 `jj st` 确认当前工作区状态",
-		"建议再执行 `jj log -r 'conflicts()|@|@-'` 查看冲突与最近变更",
-	}
-	text := strings.ToLower(strings.TrimSpace(err.Error()))
-	if class == storage.FinalizeFailureClassVersionMismatch {
+	hints := []string{fmt.Sprintf("本机仓库路径: `%s`", localPath)}
+	switch class {
+	case storage.FinalizeFailureClassNetwork:
+		hints = append(hints,
+			"检测为网络抖动；可先等待系统自动重试，也可手工执行 `jj git fetch --remote origin` 验证链路是否恢复",
+			"若多轮仍失败，请检查本机到 GitHub 的网络、代理与 DNS 配置，并关注 GitHub Status",
+		)
+	case storage.FinalizeFailureClassVersionMismatch:
 		hints = append(hints,
 			"请先执行 `jj --version` 与 `git --version` 核对本机版本",
 			"再执行 `git fetch -h | rg porcelain` 确认本机是否具备 `git fetch --porcelain` 能力",
@@ -718,16 +714,36 @@ func buildFinalizeHints(repo, localPath string, err error, class storage.Finaliz
 			"该类错误不会按网络抖动自动重试，请先处理环境兼容性后再恢复任务",
 			"可先执行 `ccclaw doctor`，确认 `jj/git 同步能力` 检查项是否已恢复为 `[ OK ]`",
 		)
-	}
-	if errors.Is(err, vcs.ErrConflict) {
+	case storage.FinalizeFailureClassConflict:
 		hints = append(hints,
+			"建议先执行 `jj st` 确认当前工作区状态",
+			"建议再执行 `jj log -r 'conflicts()|@|@-'` 查看冲突与最近变更",
 			"请在 GitHub 仓库的 `Code -> Commits` 查看远端最近提交",
 			"若涉及同一区域并发修改，请在 GitHub 仓库的 `Pull requests` 查看是否已有相关改动待合并",
 			"本地收敛后可执行 `jj resolve`，再执行 `jj git push --remote origin --bookmark main`",
 		)
-	}
-	if strings.Contains(text, "protected branch") || strings.Contains(text, "branch protection") {
-		hints = append(hints, "请在 GitHub 仓库的 `Settings -> Branches` 检查默认分支保护规则，必要时改为人工经 PR 合并")
+	case storage.FinalizeFailureClassProtection:
+		hints = append(hints,
+			"请在 GitHub 仓库的 `Settings -> Branches` 检查默认分支保护规则",
+			"若默认分支禁止直推，请改为人工经 PR 合并，或为自动账号配置允许的交付路径",
+			"处理完成前不建议继续自动重试，以免持续触发远端拒绝",
+		)
+	case storage.FinalizeFailureClassAuth:
+		hints = append(hints,
+			"请执行 `gh auth status` 或检查当前 git 凭据，确认 token/SSH key 未过期且具备目标仓推送权限",
+			"若仓库已迁移或权限模型变更，请同步更新 remote 地址与执行账号授权范围",
+			"处理完成后再执行一轮 ingest，让系统补齐同步与 DONE 回写",
+		)
+	case storage.FinalizeFailureClassConfig:
+		hints = append(hints,
+			"请检查本机 `jj`、`git` 与目标仓路径配置是否完整可用",
+			"必要时先执行 `ccclaw doctor` 确认基础依赖通过，再恢复任务",
+		)
+	default:
+		hints = append(hints,
+			"建议先手工执行 `jj git fetch --remote origin` 与 `jj git push --remote origin --bookmark main` 复现原始报错",
+			"若仍无法归类，请把完整 stderr 写回工程报告与 Issue，避免只保留摘要错误",
+		)
 	}
 	if repo != "" && repo != "知识仓库" {
 		hints = append(hints, fmt.Sprintf("请优先检查 GitHub 仓库 `%s` 的 `Code` / `Pull requests` / `Actions` 页面", repo))
@@ -1146,7 +1162,7 @@ func finalizeStepName(step string) string {
 }
 
 type finalizeFailurePolicy struct {
-	mode  finalizeFailureMode
+	mode  storage.FinalizeFailureMode
 	delay time.Duration
 }
 
@@ -1156,7 +1172,7 @@ type finalizeFailureAssessment struct {
 }
 
 func (p finalizeFailurePolicy) nextDelay(retryCount int) time.Duration {
-	if p.mode == finalizeFailurePause {
+	if p.mode == storage.FinalizeFailureModePause {
 		return p.delay
 	}
 	delay := p.delay
@@ -1176,9 +1192,9 @@ func (p finalizeFailurePolicy) nextDelay(retryCount int) time.Duration {
 }
 
 func assessFinalizeFailure(step string, err error) finalizeFailureAssessment {
-	policy := finalizeFailurePolicy{mode: finalizeFailurePause, delay: finalizeRetryManualDelay}
+	policy := finalizeFailurePolicy{mode: storage.FinalizeFailureModePause, delay: finalizeRetryManualDelay}
 	if isTransientFinalizeError(err) {
-		policy = finalizeFailurePolicy{mode: finalizeFailureRetry, delay: finalizeRetryBaseDelay}
+		policy = finalizeFailurePolicy{mode: storage.FinalizeFailureModeRetry, delay: finalizeRetryBaseDelay}
 	}
 	return finalizeFailureAssessment{
 		class:  classifyFinalizeFailureClass(step, err),
@@ -1198,6 +1214,18 @@ func classifyFinalizeFailureClass(step string, err error) storage.FinalizeFailur
 	}
 	if errors.Is(err, vcs.ErrGitTooOld) || errors.Is(err, vcs.ErrUnsupportedGit) || errors.Is(err, vcs.ErrCapabilityMismatch) {
 		return storage.FinalizeFailureClassVersionMismatch
+	}
+	if errors.Is(err, vcs.ErrSyncNetwork) {
+		return storage.FinalizeFailureClassNetwork
+	}
+	if errors.Is(err, vcs.ErrSyncAuth) {
+		return storage.FinalizeFailureClassAuth
+	}
+	if errors.Is(err, vcs.ErrSyncProtection) {
+		return storage.FinalizeFailureClassProtection
+	}
+	if errors.Is(err, vcs.ErrSyncUnknown) {
+		return storage.FinalizeFailureClassUnknown
 	}
 	if errors.Is(err, vcs.ErrJJNotAvailable) {
 		return storage.FinalizeFailureClassConfig
@@ -1282,7 +1310,13 @@ func isTransientFinalizeError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, vcs.ErrSyncNetwork) {
+		return true
+	}
 	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) || errors.Is(err, vcs.ErrGitTooOld) || errors.Is(err, vcs.ErrUnsupportedGit) || errors.Is(err, vcs.ErrCapabilityMismatch) {
+		return false
+	}
+	if errors.Is(err, vcs.ErrSyncAuth) || errors.Is(err, vcs.ErrSyncProtection) || errors.Is(err, vcs.ErrSyncUnknown) {
 		return false
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
@@ -1338,13 +1372,14 @@ func buildFinalizeFailureKey(step string, err error) string {
 	return strings.TrimSpace(step) + "|" + strings.TrimSpace(err.Error())
 }
 
-func buildFinalizeFailureEventDetail(step string, class storage.FinalizeFailureClass, errMsg string) string {
+func buildFinalizeFailureEventDetail(step string, class storage.FinalizeFailureClass, mode storage.FinalizeFailureMode, errMsg string) string {
 	stepName := finalizeStepName(step)
 	classText := formatFinalizeFailureClass(class)
+	modeText := formatFinalizeFailureMode(mode)
 	if strings.TrimSpace(errMsg) == "" {
-		return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败；失败类型 %s", stepName, classText)
+		return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败；失败类型 %s；处理策略 %s", stepName, classText, modeText)
 	}
-	return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败；失败类型 %s: %s", stepName, classText, strings.TrimSpace(errMsg))
+	return fmt.Sprintf("执行结果已产出，收尾步骤 `%s` 失败；失败类型 %s；处理策略 %s: %s", stepName, classText, modeText, strings.TrimSpace(errMsg))
 }
 
 func buildFinalizeRecoveryEventDetail(step string, class storage.FinalizeFailureClass) string {
@@ -1369,4 +1404,11 @@ func formatFinalizeFailureClass(class storage.FinalizeFailureClass) string {
 		class = storage.FinalizeFailureClassUnknown
 	}
 	return fmt.Sprintf("`%s`（%s）", class, class.Display())
+}
+
+func formatFinalizeFailureMode(mode storage.FinalizeFailureMode) string {
+	if mode == "" {
+		mode = storage.FinalizeFailureModePause
+	}
+	return fmt.Sprintf("`%s`（%s）", mode, mode.Display())
 }

@@ -64,6 +64,24 @@ func (c FinalizeFailureClass) Display() string {
 	}
 }
 
+type FinalizeFailureMode string
+
+const (
+	FinalizeFailureModeRetry FinalizeFailureMode = "retry"
+	FinalizeFailureModePause FinalizeFailureMode = "pause"
+)
+
+func (m FinalizeFailureMode) Display() string {
+	switch m {
+	case FinalizeFailureModeRetry:
+		return "自动重试"
+	case FinalizeFailureModePause:
+		return "需人工介入"
+	default:
+		return "待定"
+	}
+}
+
 type RepoSlot struct {
 	TargetRepo          string               `json:"target_repo"`
 	TaskID              string               `json:"task_id"`
@@ -79,6 +97,7 @@ type RepoSlot struct {
 	SyncHome            FinalizeStepState    `json:"sync_home,omitempty"`
 	ReportIssue         FinalizeStepState    `json:"report_issue,omitempty"`
 	FailureClass        FinalizeFailureClass `json:"failure_class,omitempty"`
+	FailureMode         FinalizeFailureMode  `json:"failure_mode,omitempty"`
 	LastError           string               `json:"last_error,omitempty"`
 	Hints               []string             `json:"hints,omitempty"`
 	LastProbeAt         time.Time            `json:"last_probe_at,omitempty"`

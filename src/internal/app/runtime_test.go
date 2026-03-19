@@ -1226,6 +1226,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 		Phase:              storage.RepoSlotPhaseFinalizeFailed,
 		CurrentStep:        "sync_home",
 		FailureClass:       storage.FinalizeFailureClassProtection,
+		FailureMode:        storage.FinalizeFailureModePause,
 		FinalizeRetryStep:  "sync_home",
 		FinalizeRetryCount: 2,
 		SyncTarget:         storage.FinalizeStepOK,
@@ -1268,6 +1269,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 				Phase              string `json:"phase"`
 				CurrentStep        string `json:"current_step"`
 				FailureClass       string `json:"failure_class"`
+				FailureMode        string `json:"failure_mode"`
 				FinalizeRetryStep  string `json:"finalize_retry_step"`
 				FinalizeRetryCount int    `json:"finalize_retry_count"`
 				NextRetryAt        string `json:"next_retry_at"`
@@ -1284,7 +1286,7 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 		t.Fatalf("unexpected slots payload: %+v", payload.Slots)
 	}
 	item := payload.Slots.Items[0]
-	if item.Phase != string(storage.RepoSlotPhaseFinalizeFailed) || item.CurrentStep != "sync_home" || item.FailureClass != string(storage.FinalizeFailureClassProtection) || item.FinalizeRetryStep != "sync_home" || item.FinalizeRetryCount != 2 || item.NextRetryAt == "" {
+	if item.Phase != string(storage.RepoSlotPhaseFinalizeFailed) || item.CurrentStep != "sync_home" || item.FailureClass != string(storage.FinalizeFailureClassProtection) || item.FailureMode != string(storage.FinalizeFailureModePause) || item.FinalizeRetryStep != "sync_home" || item.FinalizeRetryCount != 2 || item.NextRetryAt == "" {
 		t.Fatalf("unexpected slot item: %+v", item)
 	}
 }
@@ -1364,6 +1366,7 @@ printf '{}\n'
 		"执行结果: `已产出`",
 		"当前失败步骤: `sync_target`",
 		"失败类型: `network`",
+		"处理策略: `retry`",
 		"下次自动重试时间",
 	} {
 		if !strings.Contains(logText, want) {
@@ -1374,14 +1377,14 @@ printf '{}\n'
 	if err != nil {
 		t.Fatalf("读取事件失败: %v", err)
 	}
-	if len(events) == 0 || events[0].EventType != core.EventWarning || !strings.Contains(events[0].Detail, "执行结果已产出，收尾步骤 `sync_target` 失败") {
+	if len(events) == 0 || events[0].EventType != core.EventWarning || !strings.Contains(events[0].Detail, "执行结果已产出，收尾步骤 `sync_target` 失败") || !strings.Contains(events[0].Detail, "处理策略 `retry`") {
 		t.Fatalf("warning 事件文案不符合预期: %#v", events)
 	}
 	loaded, err := store.GetRepoSlot(task.TargetRepo)
 	if err != nil {
 		t.Fatalf("读取仓位失败: %v", err)
 	}
-	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() || loaded.FinalizeRetryCount != 1 || loaded.FailureClass != storage.FinalizeFailureClassNetwork {
+	if loaded == nil || loaded.LastReportedFailure == "" || loaded.NextRetryAt.IsZero() || loaded.FinalizeRetryCount != 1 || loaded.FailureClass != storage.FinalizeFailureClassNetwork || loaded.FailureMode != storage.FinalizeFailureModeRetry {
 		t.Fatalf("unexpected slot after first report: %#v", loaded)
 	}
 
@@ -1622,7 +1625,7 @@ func TestAssessFinalizeFailureVersionMismatchReturnsPause(t *testing.T) {
 	if assessment.class != storage.FinalizeFailureClassVersionMismatch {
 		t.Fatalf("expected version_mismatch, got %s", assessment.class)
 	}
-	if assessment.policy.mode != finalizeFailurePause {
+	if assessment.policy.mode != storage.FinalizeFailureModePause {
 		t.Fatalf("expected pause policy, got %+v", assessment.policy)
 	}
 }
@@ -1639,7 +1642,7 @@ func TestAssessFinalizeFailureCapabilityMismatchReturnsPause(t *testing.T) {
 	if assessment.class != storage.FinalizeFailureClassVersionMismatch {
 		t.Fatalf("expected version_mismatch, got %s", assessment.class)
 	}
-	if assessment.policy.mode != finalizeFailurePause {
+	if assessment.policy.mode != storage.FinalizeFailureModePause {
 		t.Fatalf("expected pause policy, got %+v", assessment.policy)
 	}
 }

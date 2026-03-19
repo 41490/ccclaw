@@ -18,6 +18,10 @@ var (
 	ErrConflict           = errors.New("jj rebase 产生冲突，需人工解决")
 	ErrPushFailed         = errors.New("jj git push 重试耗尽")
 	ErrGitTooOld          = errors.New("git 版本过低，不满足 jj 同步要求")
+	ErrSyncNetwork        = errors.New("仓库同步网络异常")
+	ErrSyncAuth           = errors.New("仓库同步认证或权限失败")
+	ErrSyncProtection     = errors.New("远端分支保护阻止直接推送")
+	ErrSyncUnknown        = errors.New("仓库同步出现未分类错误")
 )
 
 const (
@@ -41,6 +45,83 @@ type SyncCapabilityError struct {
 	GitVersion string
 	Probe      string
 	Detail     string
+}
+
+type SyncCommandError struct {
+	Operation string
+	Reason    error
+	Detail    string
+}
+
+func (e *SyncCommandError) Error() string {
+	if e == nil {
+		return ""
+	}
+	reason := ErrSyncUnknown.Error()
+	switch {
+	case errors.Is(e.Reason, ErrSyncNetwork):
+		reason = ErrSyncNetwork.Error()
+	case errors.Is(e.Reason, ErrSyncAuth):
+		reason = ErrSyncAuth.Error()
+	case errors.Is(e.Reason, ErrSyncProtection):
+		reason = ErrSyncProtection.Error()
+	case errors.Is(e.Reason, ErrSyncUnknown):
+		reason = ErrSyncUnknown.Error()
+	}
+	if strings.TrimSpace(e.Detail) == "" {
+		return reason
+	}
+	if strings.TrimSpace(e.Operation) == "" {
+		return reason + ": " + strings.TrimSpace(e.Detail)
+	}
+	return fmt.Sprintf("%s(%s): %s", reason, strings.TrimSpace(e.Operation), strings.TrimSpace(e.Detail))
+}
+
+func (e *SyncCommandError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Reason
+}
+
+func (e *SyncCommandError) Is(target error) bool {
+	if e == nil {
+		return target == nil
+	}
+	return errors.Is(e.Reason, target)
+}
+
+type SyncRetryError struct {
+	Operation string
+	Attempts  int
+	Cause     error
+}
+
+func (e *SyncRetryError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Cause == nil {
+		return ErrPushFailed.Error()
+	}
+	if strings.TrimSpace(e.Operation) == "" {
+		return fmt.Sprintf("%s: %v", ErrPushFailed.Error(), e.Cause)
+	}
+	return fmt.Sprintf("%s(最后失败步骤=%s, 已重试=%d): %v", ErrPushFailed.Error(), strings.TrimSpace(e.Operation), e.Attempts, e.Cause)
+}
+
+func (e *SyncRetryError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *SyncRetryError) Is(target error) bool {
+	if e == nil {
+		return target == nil
+	}
+	return target == ErrPushFailed || errors.Is(e.Cause, target)
 }
 
 func (e *SyncCapabilityError) Error() string {
@@ -130,17 +211,29 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 	}
 
 	var lastErr error
+	lastOp := ""
 	for attempt := 1; attempt <= maxRetry; attempt++ {
 		if err := runJJ(repoPath, "git", "fetch", "--remote", remote); err != nil {
 			if capabilityErr := classifyCapabilityMismatch(err, probe, "jj git fetch --remote "+remote); capabilityErr != nil {
 				return capabilityErr
 			}
+			classified := classifySyncCommandError("fetch", err)
+			if classified != nil {
+				lastErr = classified
+				lastOp = "fetch"
+				if errors.Is(classified, ErrSyncNetwork) {
+					continue
+				}
+				return classified
+			}
 			lastErr = fmt.Errorf("拉取远端失败(第 %d/%d 次): %w", attempt, maxRetry, err)
+			lastOp = "fetch"
 			continue
 		}
 		if remoteBookmarkExists(repoPath, remote, bookmark) {
 			if err := runJJ(repoPath, "rebase", "-d", fmt.Sprintf("%s@%s", bookmark, remote)); err != nil {
 				lastErr = fmt.Errorf("rebase 到 %s@%s 失败(第 %d/%d 次): %w", bookmark, remote, attempt, maxRetry, err)
+				lastOp = "rebase"
 				continue
 			}
 			conflicted, err := hasConflicts(repoPath)
@@ -167,7 +260,17 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 			if capabilityErr := classifyCapabilityMismatch(err, probe, "jj git push --remote "+remote+" --bookmark "+bookmark); capabilityErr != nil {
 				return capabilityErr
 			}
+			classified := classifySyncCommandError("push", err)
+			if classified != nil {
+				lastErr = classified
+				lastOp = "push"
+				if errors.Is(classified, ErrSyncNetwork) {
+					continue
+				}
+				return classified
+			}
 			lastErr = fmt.Errorf("推送远端失败(第 %d/%d 次): %w", attempt, maxRetry, err)
+			lastOp = "push"
 			continue
 		}
 		return nil
@@ -176,7 +279,11 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 	if lastErr == nil {
 		lastErr = errors.New("未获得可用的推送结果")
 	}
-	return fmt.Errorf("%w: %v", ErrPushFailed, lastErr)
+	return &SyncRetryError{
+		Operation: lastOp,
+		Attempts:  maxRetry,
+		Cause:     lastErr,
+	}
 }
 
 func ensureSyncCapabilities() (syncCapabilityProbe, error) {
@@ -292,6 +399,78 @@ func classifyCapabilityMismatch(err error, probe syncCapabilityProbe, command st
 		}
 	}
 	return nil
+}
+
+func classifySyncCommandError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrSyncNetwork) || errors.Is(err, ErrSyncAuth) || errors.Is(err, ErrSyncProtection) || errors.Is(err, ErrSyncUnknown) {
+		return err
+	}
+	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	reason := ErrSyncUnknown
+	switch {
+	case containsAnyMarker(text,
+		"protected branch",
+		"branch protection",
+		"protected ref",
+		"gh006",
+		"changes must be made through a pull request",
+	):
+		reason = ErrSyncProtection
+	case containsAnyMarker(text,
+		"permission denied",
+		"authentication",
+		"not authorized",
+		"repository not found",
+		"could not read from remote repository",
+		"access denied",
+		"403",
+		"401",
+	):
+		reason = ErrSyncAuth
+	case containsAnyMarker(text,
+		"timeout",
+		"timed out",
+		"temporary",
+		"temporarily",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"no route to host",
+		"network is unreachable",
+		"i/o timeout",
+		"tls handshake timeout",
+		"context deadline exceeded",
+		"unexpected eof",
+		"eof",
+		"internal server error",
+		"bad gateway",
+		"service unavailable",
+		"gateway timeout",
+		"http 502",
+		"http 503",
+		"http 504",
+		"rate limit",
+		"dial tcp",
+	):
+		reason = ErrSyncNetwork
+	}
+	return &SyncCommandError{
+		Operation: strings.TrimSpace(operation),
+		Reason:    reason,
+		Detail:    strings.TrimSpace(err.Error()),
+	}
+}
+
+func containsAnyMarker(text string, markers ...string) bool {
+	for _, marker := range markers {
+		if strings.Contains(text, strings.TrimSpace(marker)) {
+			return true
+		}
+	}
+	return false
 }
 
 func gitVersionNumber(raw string) string {

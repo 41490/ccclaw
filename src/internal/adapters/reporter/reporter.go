@@ -114,12 +114,12 @@ func (r *Reporter) ReportSkipped(task *core.Task, reason string) error {
 	return err
 }
 
-func (r *Reporter) ReportFinalizing(task *core.Task, step string, class storage.FinalizeFailureClass, errMsg string, hints []string) error {
+func (r *Reporter) ReportFinalizing(task *core.Task, step string, class storage.FinalizeFailureClass, mode storage.FinalizeFailureMode, errMsg string, hints []string) error {
 	client := r.client(task)
 	if client == nil {
 		return nil
 	}
-	body := fmt.Sprintf("任务执行已完成，但交付收尾失败。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 执行结果: `已产出`\n- 当前失败步骤: %s\n- 失败类型: %s\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, formatFinalizeStep(step), formatFinalizeFailureClass(class), strings.TrimSpace(errMsg))
+	body := fmt.Sprintf("任务执行已完成，但交付收尾失败。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 执行结果: `已产出`\n- 当前失败步骤: %s\n- 失败类型: %s\n- 处理策略: %s\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, formatFinalizeStep(step), formatFinalizeFailureClass(class), formatFinalizeFailureMode(mode), strings.TrimSpace(errMsg))
 	if len(hints) > 0 {
 		body += "\n\n下一步建议:\n"
 		for _, hint := range hints {
@@ -165,6 +165,13 @@ func formatFinalizeFailureClass(class storage.FinalizeFailureClass) string {
 		class = storage.FinalizeFailureClassUnknown
 	}
 	return fmt.Sprintf("`%s`（%s）", class, class.Display())
+}
+
+func formatFinalizeFailureMode(mode storage.FinalizeFailureMode) string {
+	if mode == "" {
+		mode = storage.FinalizeFailureModePause
+	}
+	return fmt.Sprintf("`%s`（%s）", mode, mode.Display())
 }
 
 func splitFailureMessage(raw string) (string, string) {

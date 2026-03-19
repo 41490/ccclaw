@@ -18,6 +18,7 @@ func TestSyncRepoTracksPathsAndRetriesPush(t *testing.T) {
 	t.Setenv("JJ_COMMITTED_FILE", committedFile)
 	t.Setenv("JJ_PUSH_STATE_FILE", pushState)
 	t.Setenv("JJ_PUSH_FAIL_UNTIL", "1")
+	t.Setenv("JJ_PUSH_FAIL_MESSAGE", "connection reset by peer")
 
 	if err := SyncRepo(repoPath, "journal: 2026-03-11", []string{filepath.Join(repoPath, "kb", "journal", "2026", "03", "day.md")}, 3); err != nil {
 		t.Fatalf("SyncRepo 失败: %v", err)
@@ -154,6 +155,86 @@ func TestSyncRepoStopsRetryOnCapabilityMismatchFromJJ(t *testing.T) {
 	}
 }
 
+func TestSyncRepoClassifiesBranchProtectionWithoutRetry(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_PUSH_ERROR_TEXT", "remote: error: GH006: Protected branch update failed for refs/heads/main.")
+	prepareGitVersionShim(t, "git version 2.42.0")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrSyncProtection) {
+		t.Fatalf("expected branch protection error, got %v", err)
+	}
+	if errors.Is(err, ErrPushFailed) {
+		t.Fatalf("branch protection 不应继续重试到耗尽: %v", err)
+	}
+
+	commands := readCommands(t, logFile)
+	if countCommands(commands, "git push --remote origin --bookmark main") != 1 {
+		t.Fatalf("branch protection 应在首轮 push 后停止，实际命令=%#v", commands)
+	}
+}
+
+func TestSyncRepoClassifiesAuthFailureWithoutRetry(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_FETCH_ERROR_TEXT", "fatal: Authentication failed for 'https://example.com/demo.git/'")
+	prepareGitVersionShim(t, "git version 2.42.0")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrSyncAuth) {
+		t.Fatalf("expected auth error, got %v", err)
+	}
+	if errors.Is(err, ErrPushFailed) {
+		t.Fatalf("auth failure 不应继续重试到耗尽: %v", err)
+	}
+
+	commands := readCommands(t, logFile)
+	if countCommands(commands, "git fetch --remote origin") != 1 {
+		t.Fatalf("auth failure 应在首轮 fetch 后停止，实际命令=%#v", commands)
+	}
+}
+
+func TestSyncRepoKeepsNetworkClassWhenRetryExhausted(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_PUSH_ERROR_TEXT", "dial tcp 140.82.112.4:443: i/o timeout")
+	prepareGitVersionShim(t, "git version 2.42.0")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrPushFailed) || !errors.Is(err, ErrSyncNetwork) {
+		t.Fatalf("expected retry-exhausted network error, got %v", err)
+	}
+
+	commands := readCommands(t, logFile)
+	if countCommands(commands, "git push --remote origin --bookmark main") != 3 {
+		t.Fatalf("network failure 应按 maxRetry 重试，实际命令=%#v", commands)
+	}
+}
+
+func TestSyncRepoClassifiesUnknownFailure(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	logFile, committedFile := prepareFakeJJ(t)
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_PUSH_ERROR_TEXT", "remote rejected for unexplained reason")
+	prepareGitVersionShim(t, "git version 2.42.0")
+
+	err := SyncRepo(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrSyncUnknown) {
+		t.Fatalf("expected unknown sync error, got %v", err)
+	}
+	if errors.Is(err, ErrPushFailed) {
+		t.Fatalf("unknown failure 当前应直接抛出，实际=%v", err)
+	}
+}
+
 func initGitRepo(t *testing.T, withRemote bool) string {
 	t.Helper()
 	repoPath := t.TempDir()
@@ -212,15 +293,27 @@ case "${1:-}" in
         target="${@: -1}"
         mkdir -p "$target/.jj"
         ;;
-      fetch)
+  fetch)
         if [[ "${JJ_FETCH_CAPABILITY_FAIL:-0}" == "1" ]]; then
           printf 'Error: Git does not recognize required option: porcelain (note: supported version is 2.41.0)\n' >&2
+          exit 1
+        fi
+        if [[ -n "${JJ_FETCH_ERROR_TEXT:-}" ]]; then
+          printf '%s\n' "${JJ_FETCH_ERROR_TEXT}" >&2
           exit 1
         fi
         ;;
       push)
         state_file="${JJ_PUSH_STATE_FILE:-}"
         fail_until="${JJ_PUSH_FAIL_UNTIL:-0}"
+        push_error="${JJ_PUSH_ERROR_TEXT:-}"
+        if [[ -z "$push_error" ]]; then
+          push_error="${JJ_PUSH_FAIL_MESSAGE:-push failed}"
+        fi
+        if [[ -n "${JJ_PUSH_ERROR_TEXT:-}" ]]; then
+          printf '%s\n' "$push_error" >&2
+          exit 1
+        fi
         if [[ -n "$state_file" ]]; then
           count=0
           if [[ -f "$state_file" ]]; then
@@ -229,7 +322,7 @@ case "${1:-}" in
           count=$((count + 1))
           printf '%s' "$count" > "$state_file"
           if (( count <= fail_until )); then
-            printf 'push failed\n' >&2
+            printf '%s\n' "$push_error" >&2
             exit 1
           fi
         fi
