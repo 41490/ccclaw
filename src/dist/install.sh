@@ -1119,7 +1119,7 @@ print_flow() {
   fi
   cat <<FLOW
 == 计划执行流程 ==
-1. 探查现有环境：claude / gh / rg / sqlite3 / tmux / rtk / git / node / npm / uv / systemd --user
+1. 探查现有环境：claude / gh / rg / tmux / rtk / git / node / npm / uv / systemd --user
 2. 决定程序目录与本体仓库目录：
    - 程序目录: $APP_DIR
    - 本体仓库: $HOME_REPO
@@ -1148,7 +1148,7 @@ $home_repo_step_body
    - $APP_DIR/ops/*
    - shell 集成默认关闭；仅在 --inject-shell bashrc 时写入受控 PATH 块
 8. 安装基础工具：
-   - 必装: git gh rg sqlite3 tmux curl wget golang
+   - 必装: git gh rg tmux curl wget golang
    - 能力工具: node npm uv
    - token 优化: rtk
 9. Claude 生态处理：
@@ -1298,7 +1298,7 @@ validate_shell_options() {
 ensure_system_packages() {
   local missing_tools=()
   local missing_packages=()
-  local required=(git gh rg sqlite3 tmux curl wget)
+  local required=(git gh rg tmux curl wget)
   local optional=(node npm uv)
   for tool in "${required[@]}"; do
     if ! have "$tool"; then

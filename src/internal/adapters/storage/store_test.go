@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -547,5 +549,48 @@ func TestTaskClassFlowStatsBetween(t *testing.T) {
 	}
 	if deep.AvgCloseSeconds <= 0 {
 		t.Fatalf("unexpected deep avg close: %#v", deep)
+	}
+}
+
+func TestOpenRejectsLegacyDBPath(t *testing.T) {
+	if _, err := Open(filepath.Join(t.TempDir(), "state.db")); err == nil {
+		t.Fatal("expected .db path to be rejected")
+	}
+}
+
+func TestOpenArchivesLegacyDBFiles(t *testing.T) {
+	varDir := filepath.Join(t.TempDir(), "var")
+	if err := os.MkdirAll(varDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"state.db", "ccclaw.db"} {
+		if err := os.WriteFile(filepath.Join(varDir, name), []byte(name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store, err := Open(varDir)
+	if err != nil {
+		t.Fatalf("open failed: %v", err)
+	}
+	defer store.Close()
+
+	for _, name := range []string{"state.db", "ccclaw.db"} {
+		if _, err := os.Stat(filepath.Join(varDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected legacy db to be removed from var dir: %s", name)
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(varDir, "archive", "legacy-db"))
+	if err != nil {
+		t.Fatalf("read legacy archive dir failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("unexpected legacy archive entries: %d", len(entries))
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".bak") {
+			t.Fatalf("unexpected archive name: %s", entry.Name())
+		}
 	}
 }

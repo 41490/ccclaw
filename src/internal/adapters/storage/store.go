@@ -175,8 +175,14 @@ func (r tokenJSONRecord) GetHash() string {
 
 func Open(path string) (*Store, error) {
 	varDir := resolveVarDir(path)
+	if strings.HasSuffix(strings.ToLower(varDir), ".db") {
+		return nil, fmt.Errorf("storage.Open 仅接受 var_dir 目录，不接受 .db 路径: %s", path)
+	}
 	if err := os.MkdirAll(varDir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建状态目录失败: %w", err)
+	}
+	if err := cleanupLegacyDBFiles(varDir); err != nil {
+		return nil, err
 	}
 	return &Store{
 		varDir: varDir,
@@ -989,9 +995,5 @@ func normalizeTaskClass(taskClass core.TaskClass) core.TaskClass {
 }
 
 func resolveVarDir(path string) string {
-	path = filepath.Clean(path)
-	if strings.HasSuffix(path, ".db") {
-		return filepath.Dir(path)
-	}
-	return path
+	return filepath.Clean(path)
 }

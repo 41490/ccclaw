@@ -33,7 +33,7 @@
 - `~/.claude/settings.json`
 - `~/.claude/.credentials.json`
 - 已安装 plugins / marketplaces
-- `gh` / `rg` / `sqlite3` / `rtk` / `git` / `node` / `npm` / `uv`
+- `gh` / `rg` / `rtk` / `git` / `node` / `npm` / `uv`
 - `gh auth status` / `gh auth token`
 - `systemctl --user` 与 `~/.config/systemd/user` 可用性
 
@@ -46,7 +46,6 @@
 - 不默认补装 plugins / marketplace / `example-skills`
 - 若缺少 `rtk`：优先按官方 quick install 安装
 - 不默认执行 `rtk init --global`
-- 若缺少 `sqlite3`：优先通过系统包管理器安装
 - 知识仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
 - 任务仓库默认不绑定；若指定远程仓库，则 clone 到 `/opt/src/3claw/owner/repo`
 - 若 `gh` 已登录，则优先复用 `gh auth token` 写入 `.env`

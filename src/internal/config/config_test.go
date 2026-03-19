@@ -289,7 +289,7 @@ minimum_permission = "maintain"
 	}
 }
 
-func TestLoadAutoRewritesLegacyStateDBToVarDir(t *testing.T) {
+func TestLoadRejectsLegacyStateDBPath(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	content := `[github]
@@ -314,25 +314,42 @@ minimum_permission = "maintain"
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("load failed: %v", err)
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected legacy paths.state_db to be rejected")
+	} else if got := err.Error(); !strings.Contains(got, "config migrate") {
+		t.Fatalf("expected migration hint, got %q", got)
 	}
-	if got, want := cfg.Paths.VarDir, "/tmp/ccclaw-app/var"; got != want {
-		t.Fatalf("unexpected var dir: got=%q want=%q", got, want)
-	}
+}
 
-	payload, err := os.ReadFile(configPath)
-	if err != nil {
+func TestLoadRejectsVarDirDBPath(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	content := `[github]
+control_repo = "41490/ccclaw"
+
+[paths]
+app_dir = "/tmp/ccclaw-app"
+home_repo = "/opt/ccclaw"
+var_dir = "/tmp/ccclaw-app/var/state.db"
+log_dir = "/tmp/ccclaw-app/log"
+kb_dir = "/opt/ccclaw/kb"
+env_file = "/tmp/ccclaw-app/.env"
+
+[executor]
+command = ["claude"]
+
+[approval]
+words = ["approve"]
+reject_words = ["reject"]
+minimum_permission = "maintain"
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	text := string(payload)
-	if !strings.Contains(text, `var_dir = "/tmp/ccclaw-app/var"`) {
-		t.Fatalf("expected var_dir auto writeback, got %q", text)
-	}
-	if strings.Contains(text, "state_db") {
-		t.Fatalf("legacy state_db should be removed, got %q", text)
+	if _, err := Load(configPath); err == nil {
+		t.Fatal("expected .db var_dir to be rejected")
+	} else if got := err.Error(); !strings.Contains(got, "不能指向 .db 文件") {
+		t.Fatalf("unexpected error: %q", got)
 	}
 }
 

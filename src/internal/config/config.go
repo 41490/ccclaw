@@ -17,6 +17,7 @@ import (
 const OfficialControlRepo = "41490/ccclaw"
 
 const legacyApprovalMigrationHint = "检测到废弃配置 approval.command；请执行 `ccclaw config migrate`，或兼容使用 `ccclaw config migrate-approval`"
+const legacyStateDBMigrationHint = "检测到废弃配置 paths.state_db；请执行 `ccclaw config migrate` 迁移到 paths.var_dir"
 
 const (
 	defaultSchedulerLogLevel         = "info"
@@ -125,14 +126,9 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
-	updatedPayload, changed, err := rewriteLegacyStateDBPaths(string(payload))
-	if err != nil {
-		return nil, err
-	}
-	if changed {
-		if err := os.WriteFile(path, []byte(updatedPayload), 0o644); err != nil {
-			return nil, fmt.Errorf("自动回写废弃 paths.state_db 失败: %w", err)
-		}
+	updatedPayload := string(payload)
+	if configContainsLegacyStateDB(updatedPayload) {
+		return nil, fmt.Errorf("%s: %s", legacyStateDBMigrationHint, path)
 	}
 
 	v := viper.New()
@@ -229,6 +225,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.Paths.VarDir == "" {
 		return errors.New("paths.var_dir 不能为空")
+	}
+	if strings.HasSuffix(strings.ToLower(cfg.Paths.VarDir), ".db") {
+		return errors.New("paths.var_dir 必须是目录，不能指向 .db 文件")
 	}
 	if cfg.Paths.LogDir == "" {
 		return errors.New("paths.log_dir 不能为空")
@@ -602,6 +601,7 @@ func Migrate(path string) (bool, error) {
 	loadPath := path
 	updatedPayload := string(payload)
 	approvalChanged := false
+	stateDBChanged := false
 
 	if rewritten, changed, err := rewriteApprovalSection(updatedPayload); err == nil {
 		if changed {
@@ -611,9 +611,15 @@ func Migrate(path string) (bool, error) {
 	} else if !errors.Is(err, os.ErrNotExist) && !strings.Contains(err.Error(), "未找到 [approval] 配置段") {
 		return false, err
 	}
+	if rewritten, changed, err := rewriteLegacyStateDBPaths(updatedPayload); err != nil {
+		return false, err
+	} else if changed {
+		updatedPayload = rewritten
+		stateDBChanged = true
+	}
 
 	var cleanup func()
-	if approvalChanged {
+	if approvalChanged || stateDBChanged {
 		tmpFile, err := os.CreateTemp(filepath.Dir(path), ".ccclaw-config-migrate-*.toml")
 		if err != nil {
 			return false, fmt.Errorf("创建迁移临时文件失败: %w", err)
@@ -806,11 +812,7 @@ func normalizeVarDir(path string) string {
 	if path == "" {
 		return ""
 	}
-	path = filepath.Clean(path)
-	if strings.HasSuffix(strings.ToLower(path), ".db") {
-		return filepath.Dir(path)
-	}
-	return path
+	return filepath.Clean(path)
 }
 
 func approvalSectionContainsLegacyCommand(content string) bool {
@@ -925,6 +927,33 @@ func rewriteLegacyStateDBPaths(content string) (string, bool, error) {
 	return strings.Join(updatedLines, "\n"), true, nil
 }
 
+func configContainsLegacyStateDB(content string) bool {
+	lines := strings.Split(content, "\n")
+	start := -1
+	end := len(lines)
+	for idx, line := range lines {
+		if isPathsHeader(line) {
+			start = idx
+			break
+		}
+	}
+	if start < 0 {
+		return false
+	}
+	for idx := start + 1; idx < len(lines); idx++ {
+		if isSectionHeader(lines[idx]) {
+			end = idx
+			break
+		}
+	}
+	for _, line := range lines[start:end] {
+		if tomlKeyName(line) == "state_db" {
+			return true
+		}
+	}
+	return false
+}
+
 func rewriteLegacyStateDBLine(line string) (string, error) {
 	indentWidth := len(line) - len(strings.TrimLeft(line, " \t"))
 	indent := line[:indentWidth]
@@ -937,8 +966,20 @@ func rewriteLegacyStateDBLine(line string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("解析 paths.state_db 失败: %w", err)
 	}
-	renderedValue := renderTomlStringValue(normalizeVarDir(value), quote)
+	renderedValue := renderTomlStringValue(legacyStateDBToVarDir(value), quote)
 	return indent + "var_dir = " + renderedValue + suffix, nil
+}
+
+func legacyStateDBToVarDir(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if strings.HasSuffix(strings.ToLower(path), ".db") {
+		return filepath.Dir(path)
+	}
+	return path
 }
 
 func parseTomlStringValue(raw string) (value, quote, suffix string, err error) {
