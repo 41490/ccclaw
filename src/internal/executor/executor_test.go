@@ -278,6 +278,9 @@ func TestLoadResultFallsBackToDiagnosticFile(t *testing.T) {
 			if loadErr == nil {
 				t.Fatal("预期返回解析错误")
 			}
+			if !strings.Contains(loadErr.Error(), tc.want) {
+				t.Fatalf("预期错误包含诊断摘要，实际为 %v", loadErr)
+			}
 			if result == nil || !strings.Contains(result.Output, tc.want) {
 				t.Fatalf("预期保留原始诊断输出，实际为 %#v", result)
 			}
@@ -332,6 +335,43 @@ func TestLoadResultPromotesTMuxStdoutFileToStructuredResult(t *testing.T) {
 	}
 	if _, err := os.Stat(artifacts.StdoutFile); !os.IsNotExist(err) {
 		t.Fatalf("预期 stdout 暂存文件已清理，实际 err=%v", err)
+	}
+}
+
+func TestLoadResultUsesLogTailWhenStructuredResultMissing(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptPath := filepath.Join(tmpDir, "fake-claude.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("写入脚本失败: %v", err)
+	}
+	execEngine, err := New([]string{scriptPath}, "", time.Minute, filepath.Join(tmpDir, "log"), filepath.Join(tmpDir, "result"), nil, nil)
+	if err != nil {
+		t.Fatalf("创建执行器失败: %v", err)
+	}
+
+	artifacts := execEngine.ArtifactPaths("11#body")
+	if err := os.WriteFile(artifacts.ResultFile, nil, 0o644); err != nil {
+		t.Fatalf("写入空结果文件失败: %v", err)
+	}
+	if err := os.WriteFile(artifacts.DiagnosticFile, nil, 0o644); err != nil {
+		t.Fatalf("写入空诊断文件失败: %v", err)
+	}
+	if err := os.WriteFile(artifacts.LogFile, []byte("ccclaude: exec: claude: not found\n"), 0o644); err != nil {
+		t.Fatalf("写入日志失败: %v", err)
+	}
+
+	result, loadErr := execEngine.LoadResult("11#body")
+	if loadErr == nil {
+		t.Fatal("预期返回结构化结果缺失错误")
+	}
+	if !strings.Contains(loadErr.Error(), "结构化结果缺失") {
+		t.Fatalf("预期错误明确说明结构化结果缺失，实际为 %v", loadErr)
+	}
+	if !strings.Contains(loadErr.Error(), "claude: not found") {
+		t.Fatalf("预期错误回退到日志尾部诊断，实际为 %v", loadErr)
+	}
+	if result != nil {
+		t.Fatalf("预期仅返回错误并由上层补充诊断结果，实际为 %#v", result)
 	}
 }
 

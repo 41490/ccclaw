@@ -175,7 +175,7 @@ func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *s
 	return nil
 }
 
-func (rt *Runtime) dispatchNextSingleFlight(ctx context.Context, out io.Writer, _ map[string]struct{}) error {
+func (rt *Runtime) dispatchNextSingleFlight(ctx context.Context, out io.Writer, advanced map[string]struct{}) error {
 	slots, err := rt.store.ListRepoSlots()
 	if err != nil {
 		return err
@@ -183,6 +183,12 @@ func (rt *Runtime) dispatchNextSingleFlight(ctx context.Context, out io.Writer, 
 	if len(slots) > 0 {
 		if out != nil {
 			_, _ = fmt.Fprintf(out, "当前已有 %d 个活动槽位，本轮保持全局单飞串行\n", len(slots))
+		}
+		return nil
+	}
+	if len(advanced) > 0 {
+		if out != nil {
+			_, _ = fmt.Fprintf(out, "本轮已推进 %d 个槽位，继续保持全局单飞串行\n", len(advanced))
 		}
 		return nil
 	}
@@ -797,7 +803,7 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 				advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 				slot.CompletedAt = time.Now().UTC()
 				slot.LastProbeAt = time.Now().UTC()
-				slot.LastError = "tmux 会话已退出，等待 ingest 收口"
+				slot.LastError = formatLaunchProbeFailure(execEngine, slot.TaskID, "tmux 会话已退出，等待 ingest 收口")
 				if err := rt.store.UpsertRepoSlot(slot); err != nil {
 					return err
 				}
@@ -810,6 +816,7 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 			advanceRepoSlotPhase(slot, storage.RepoSlotPhasePaneDead, "load_result")
 			slot.CompletedAt = time.Now().UTC()
 			slot.LastProbeAt = time.Now().UTC()
+			slot.LastError = formatLaunchProbeFailure(execEngine, slot.TaskID, fmt.Sprintf("tmux 会话已退出(exit=%d)，等待 ingest 收口", status.ExitCode))
 			if err := rt.store.UpsertRepoSlot(slot); err != nil {
 				return err
 			}

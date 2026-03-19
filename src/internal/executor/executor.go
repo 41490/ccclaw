@@ -173,15 +173,16 @@ func (e *Executor) LoadResult(taskID string) (*Result, error) {
 	if sanitizeErr != nil {
 		return nil, sanitizeErr
 	}
+	diagnosticSummary := loadStructuredResultDiagnosticSummary(diagnosticPayload, artifacts.LogFile)
 	fallback := fallbackResultFromRaw(diagnosticPayload, artifacts.LogFile, artifacts.ResultFile, artifacts.DiagnosticFile)
 	if fallback != nil {
 		e.applyArtifactMetadata(fallback, artifacts, meta)
-		return fallback, wrapStructuredResultError(resultPayload, parseErr, true)
+		return fallback, wrapStructuredResultError(resultPayload, parseErr, true, diagnosticSummary)
 	}
 	if result != nil {
-		return result, wrapStructuredResultError(resultPayload, parseErr, false)
+		return result, wrapStructuredResultError(resultPayload, parseErr, false, diagnosticSummary)
 	}
-	return nil, wrapStructuredResultError(resultPayload, parseErr, false)
+	return nil, wrapStructuredResultError(resultPayload, parseErr, false, diagnosticSummary)
 }
 
 func (e *Executor) Timeout() time.Duration {
@@ -911,24 +912,96 @@ func (e *Executor) materializeTMuxStreamArtifacts(taskID string, artifacts Resul
 	return compatPayload, nil
 }
 
-func wrapStructuredResultError(resultPayload []byte, parseErr error, hasDiagnostic bool) error {
+func wrapStructuredResultError(resultPayload []byte, parseErr error, hasDiagnostic bool, diagnostic string) error {
 	trimmed := bytes.TrimSpace(resultPayload)
 	if len(trimmed) == 0 {
 		if hasDiagnostic {
-			return fmt.Errorf("结构化结果缺失，已回退诊断文件")
+			return appendStructuredResultDiagnostic(fmt.Errorf("结构化结果缺失，已回退诊断文件"), diagnostic)
 		}
-		return fmt.Errorf("结构化结果缺失")
+		return appendStructuredResultDiagnostic(fmt.Errorf("结构化结果缺失"), diagnostic)
 	}
 	if parseErr == nil {
 		if hasDiagnostic {
-			return fmt.Errorf("结构化结果缺失，已回退诊断文件")
+			return appendStructuredResultDiagnostic(fmt.Errorf("结构化结果缺失，已回退诊断文件"), diagnostic)
 		}
-		return fmt.Errorf("结构化结果缺失")
+		return appendStructuredResultDiagnostic(fmt.Errorf("结构化结果缺失"), diagnostic)
 	}
 	if hasDiagnostic {
-		return fmt.Errorf("结构化结果解析失败: %w；已回退诊断文件", parseErr)
+		return appendStructuredResultDiagnostic(fmt.Errorf("结构化结果解析失败: %w；已回退诊断文件", parseErr), diagnostic)
 	}
-	return fmt.Errorf("结构化结果解析失败: %w", parseErr)
+	return appendStructuredResultDiagnostic(fmt.Errorf("结构化结果解析失败: %w", parseErr), diagnostic)
+}
+
+func appendStructuredResultDiagnostic(base error, diagnostic string) error {
+	diagnostic = strings.TrimSpace(diagnostic)
+	if base == nil || diagnostic == "" {
+		return base
+	}
+	message := base.Error()
+	if strings.Contains(message, diagnostic) {
+		return base
+	}
+	return fmt.Errorf("%s；诊断输出: %s", message, diagnostic)
+}
+
+func loadStructuredResultDiagnosticSummary(diagnosticPayload []byte, logFile string) string {
+	diagnostic := summarizeStructuredResultDiagnostic(string(diagnosticPayload))
+	if diagnostic != "" {
+		return diagnostic
+	}
+	return readStructuredResultLogTail(logFile, 12)
+}
+
+func readStructuredResultLogTail(path string, maxLines int) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.ReplaceAll(string(payload), "\r\n", "\n"), "\n")
+	trimmed := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		trimmed = append(trimmed, line)
+	}
+	if len(trimmed) == 0 {
+		return ""
+	}
+	if maxLines > 0 && len(trimmed) > maxLines {
+		trimmed = trimmed[len(trimmed)-maxLines:]
+	}
+	return summarizeStructuredResultDiagnostic(strings.Join(trimmed, "\n"))
+}
+
+func summarizeStructuredResultDiagnostic(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '\n' || r == '\r'
+	})
+	summary := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		summary = append(summary, part)
+	}
+	if len(summary) == 0 {
+		return ""
+	}
+	text := strings.Join(summary, " | ")
+	if len(text) > 400 {
+		return strings.TrimSpace(text[:397]) + "..."
+	}
+	return text
 }
 
 func joinDiagnosticPayloads(chunks ...[]byte) []byte {
