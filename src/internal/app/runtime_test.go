@@ -51,6 +51,39 @@ func TestResolveTargetRepoFallsBackToDefaultTarget(t *testing.T) {
 	}
 }
 
+func TestObservedIssueReposDedupesControlAndTargets(t *testing.T) {
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Targets: []config.TargetConfig{
+				{
+					Repo:      "41490/ccclaw",
+					LocalPath: "/opt/src/ccclaw",
+				},
+				{
+					Repo:      "41490/repo-a",
+					LocalPath: "/opt/src/repo-a",
+				},
+				{
+					Repo:      "41490/repo-b",
+					LocalPath: "/opt/src/repo-b",
+					Disabled:  true,
+				},
+			},
+		},
+	}
+	got := rt.observedIssueRepos()
+	want := []string{"41490/ccclaw", "41490/repo-a"}
+	if len(got) != len(want) {
+		t.Fatalf("unexpected observed repos: got=%#v want=%#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("unexpected observed repos: got=%#v want=%#v", got, want)
+		}
+	}
+}
+
 func TestResolveTargetRepoUsesIssueRepoWhenItIsEnabledTarget(t *testing.T) {
 	rt := &Runtime{
 		cfg: &config.Config{
@@ -90,6 +123,99 @@ func TestResolveTargetRepoBlocksWhenNoTargetConfigured(t *testing.T) {
 	}
 	if len(reasons) != 1 {
 		t.Fatalf("expected 1 reason, got %#v", reasons)
+	}
+}
+
+func TestSyncIssueBlocksWhenIssueRepoOutsideObservationBoundary(t *testing.T) {
+	fakeBin := writeFakeBin(t, map[string]string{
+		"gh": `#!/bin/sh
+set -eu
+if [ "${1:-}" != "api" ]; then
+  exit 1
+fi
+endpoint="${2:-}"
+case "$endpoint" in
+  "repos/41490/outside/collaborators/ZoomQuiet/permission")
+    printf '{"permission":"admin"}\n'
+    ;;
+  "repos/41490/outside/issues/41/comments?per_page=100")
+    printf '[]\n'
+    ;;
+  *)
+    printf 'unexpected endpoint: %s\n' "$endpoint" >&2
+    exit 1
+    ;;
+esac
+`,
+	})
+	t.Setenv("PATH", fakeBin)
+
+	store, err := storage.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			DefaultTarget: "41490/work",
+			GitHub: config.GitHubConfig{
+				ControlRepo: "41490/ccclaw",
+				IssueLabel:  "ccclaw",
+				Limit:       20,
+			},
+			Paths: config.PathsConfig{KBDir: "/opt/ccclaw/kb"},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/work",
+				LocalPath: "/opt/src/work",
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store:   store,
+		ghCache: map[string]*github.Client{},
+	}
+
+	issue := github.Issue{
+		Repo:      "41490/outside",
+		Number:    41,
+		Title:     "越界入口",
+		Body:      "请处理这个问题",
+		State:     "open",
+		User:      github.User{Login: "ZoomQuiet"},
+		Labels:    []github.Label{{Name: "ccclaw"}},
+		CreatedAt: time.Date(2026, 3, 20, 10, 0, 0, 0, time.UTC),
+	}
+	if err := rt.syncIssue(context.Background(), issue, true); err != nil {
+		t.Fatalf("syncIssue failed: %v", err)
+	}
+
+	task, err := store.GetByIdempotency(core.IdempotencyKey(issue.Repo, issue.Number))
+	if err != nil {
+		t.Fatalf("读取任务失败: %v", err)
+	}
+	if task == nil {
+		t.Fatal("expected task to be created")
+	}
+	if task.State != core.StateBlocked {
+		t.Fatalf("expected blocked task, got %#v", task)
+	}
+	if task.TargetRepo != "41490/work" {
+		t.Fatalf("unexpected target repo: %#v", task)
+	}
+
+	events, err := store.ListTaskEvents(10)
+	if err != nil {
+		t.Fatalf("读取事件失败: %v", err)
+	}
+	found := false
+	for _, event := range events {
+		if event.EventType == core.EventBlocked && strings.Contains(event.Detail, "不在当前观测边界内") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected observation boundary block event, got %#v", events)
 	}
 }
 

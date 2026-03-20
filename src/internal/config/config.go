@@ -1173,9 +1173,11 @@ func renderAnnotatedConfig(cfg *Config) string {
 	buf.WriteString("[github]\n")
 	buf.WriteString(fmt.Sprintf("control_repo = %q\n", cfg.GitHub.ControlRepo))
 	buf.WriteString(fmt.Sprintf("issue_label = %q\n", cfg.GitHub.IssueLabel))
-	buf.WriteString("# ingest 每轮会在 control_repo 与所有启用 target repo 中分别拉取 open issues。\n")
+	buf.WriteString("# ingest 每轮只观察两类 Issue 来源仓库：\n")
+	buf.WriteString("# - 官方 control_repo\n")
+	buf.WriteString("# - 每个已启用 [[targets]].repo（这些仓库可直接承载对应 target 的 Issue）\n")
 	buf.WriteString("# - 只统计匹配 issue_label 的 Issue\n")
-	buf.WriteString("# - 不是并发数；实际执行改由 ingest 按仓槽位推进\n")
+	buf.WriteString("# - 不是并发数；实际执行仍按全局单飞串行推进\n")
 	buf.WriteString(fmt.Sprintf("limit = %d\n\n", cfg.GitHub.Limit))
 
 	buf.WriteString("# 固定路径边界：\n")

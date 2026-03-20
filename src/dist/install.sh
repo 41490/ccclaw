@@ -1542,7 +1542,7 @@ default_target = ""
 [github]
 control_repo = "$CONTROL_REPO"
 issue_label = "ccclaw"
-# ingest 每轮通过 GitHub API 拉取 open issues 的上限。
+# ingest 每轮只观察控制仓库与已启用 target 仓库中的 open issues。
 # - 只统计匹配 issue_label 的 Issue
 # - 不是并发数，也不是 run 阶段的执行上限
 limit = 20

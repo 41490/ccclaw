@@ -150,6 +150,23 @@ systemd --user timers
 
 单仓库场景下，控制仓库也可以与任务仓库是同一个仓库；多项目协作时，控制仓库与某个任务仓库也允许重叠，但是否执行仍以 `ccclaw` 标签和审批门禁为准。
 
+### Issue 观测边界怎么判定
+
+`ccclaw` 在仓库语义上还要区分 4 个紧挨着、但不能混用的概念：
+
+- `Issue 来源仓库` / `issue_repo`：`ingest` 每轮只观察 `github.control_repo` 与所有已启用 `[[targets]].repo`；这组仓库就是当前 Issue 观测边界
+- `Issue 仓库`：具体某条 Issue 实际所在的仓库；审批、标签、回帖、`/ccclaw [DONE]` 与状态页里的 `ISSUE` 都以它为准
+- `target_repo`：代码落点路由字段；解析顺序固定为 `target_repo:` 显式声明 -> Issue 仓库本身就是启用 target -> `default_target`
+- `control_repo`：官方控制面默认入口；它定义默认入口与自维护落点，但不会替代实际 `issue_repo` 去回帖
+
+调度链路里的口径也按这个边界拆开：
+
+- `ingest` 只负责观察当前观测边界内的 Issue
+- `dispatch / slot / sync_target / journal` 只看 `target_repo`
+- `reporter / approval / status / done marker` 只看 `issue_repo`
+
+如果某条 Issue 来自观测边界之外的仓库，即使还能解析出某个 `target_repo`，当前实现也会先把它标成 `BLOCKED`，而不是默认为正常入口。
+
 ### 知识仓库是什么
 
 知识仓库对应 `paths.home_repo`，默认是 `/opt/ccclaw`。
@@ -779,13 +796,14 @@ CLI 约定：
 ## 日常使用流程
 
 1. 绑定工作任务仓库
-2. 在控制仓库或任一已绑定任务仓库创建/维护带 `ccclaw` 标签的 Issue
+2. 在当前观测边界内创建/维护带 `ccclaw` 标签的 Issue
+   默认观测边界是控制仓库 + 所有已启用 target 仓库
 3. 由 `ccclaw` 巡检并在满足门禁后执行
 4. 检验工作成果，并继续在 Issue 中回复交流
 
 开源协作门禁流程：
 
-1. 控制仓库与所有已绑定任务仓库中，只有带 `ccclaw` 标签的 open Issue 才进入执行判定
+1. 当前观测边界内，只有带 `ccclaw` 标签的 open Issue 才进入执行判定
 2. `maintain` 及以上成员创建的 Issue 自动进入执行判定；外部成员 Issue 默认只巡查与讨论
 3. 受信任成员评论 `/ccclaw <批准词>` 后，Issue 才进入执行；最新评论也可用 `/ccclaw <否决词>` 撤回
 4. 若 `ccclaw` 标签被移除，任务转为 `BLOCKED`，重新加标签后再恢复判定

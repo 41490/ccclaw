@@ -146,6 +146,23 @@ Best fit for a control repository:
 
 In a single-repo setup, the control repository can be the same as a task repository. In multi-project setups, the control repository may still overlap with one task repository, but execution still depends on the `ccclaw` label plus the approval gate.
 
+### How Issue observation boundaries work
+
+`ccclaw` still needs four closely related but non-interchangeable repository concepts:
+
+- `Issue source repository` / `issue_repo`: each ingest round only observes `github.control_repo` plus every enabled `[[targets]].repo`; together they form the current Issue observation boundary
+- `Issue repository`: the repository that actually hosts a given Issue; approvals, labels, report comments, `/ccclaw [DONE]`, and the `ISSUE` column in status output all follow this repository
+- `target_repo`: the code landing route; resolution order stays `target_repo:` in the Issue body -> the Issue repository itself when it is an enabled target -> `default_target`
+- `control_repo`: the default official control-plane entry; it defines the default entrypoint and self-maintenance landing zone, but it does not replace the real `issue_repo` for reporting
+
+The runtime chain follows the same split:
+
+- `ingest` only observes Issues inside the current observation boundary
+- `dispatch / slot / sync_target / journal` only use `target_repo`
+- `reporter / approval / status / done marker` only use `issue_repo`
+
+If an Issue comes from a repository outside the observation boundary, the current implementation blocks it first even if a valid `target_repo` can still be resolved.
+
 ### What is the knowledge repository
 
 The knowledge repository is `paths.home_repo`, defaulting to `/opt/ccclaw`.
@@ -677,13 +694,14 @@ It contains:
 ## Daily Workflow
 
 1. bind a work repository
-2. create or update a labeled `ccclaw` Issue in the control repository or any bound task repository
+2. create or update a labeled `ccclaw` Issue inside the current observation boundary
+   by default, that boundary is the control repository plus all enabled target repositories
 3. let `ccclaw` inspect and execute when the gate allows it
 4. review results and continue discussion in the Issue
 
 Open-source gate flow:
 
-1. Only open Issues with the `ccclaw` label in the control repository or any bound task repository enter execution evaluation
+1. Only open Issues with the `ccclaw` label inside the current observation boundary enter execution evaluation
 2. Issues created by members with `maintain` or above are eligible for automatic execution; external Issues are inspected and discussed by default
 3. A trusted `/ccclaw <approval-word>` comment moves the Issue into execution, and a later trusted reject word can pull it back
 4. If the `ccclaw` label is removed, the task becomes `BLOCKED` until the label is added back

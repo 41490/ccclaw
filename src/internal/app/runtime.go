@@ -112,7 +112,7 @@ func (rt *Runtime) repoSync(repoPath, message string, paths []string, maxRetry i
 	return vcs.SyncRepo(repoPath, message, paths, maxRetry)
 }
 
-func (rt *Runtime) issueSourceRepos() []string {
+func (rt *Runtime) observedIssueRepos() []string {
 	repos := make([]string, 0, len(rt.cfg.Targets)+1)
 	seen := map[string]struct{}{}
 	appendRepo := func(repo string) {
@@ -133,10 +133,52 @@ func (rt *Runtime) issueSourceRepos() []string {
 	return repos
 }
 
+func (rt *Runtime) observesIssueRepo(repo string) bool {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return false
+	}
+	for _, candidate := range rt.observedIssueRepos() {
+		if strings.EqualFold(candidate, repo) {
+			return true
+		}
+	}
+	return false
+}
+
+func (rt *Runtime) issueObservationBlockReasons(issueRepo string) []string {
+	issueRepo = strings.TrimSpace(issueRepo)
+	if issueRepo == "" || rt.observesIssueRepo(issueRepo) {
+		return nil
+	}
+	observed := rt.observedIssueRepos()
+	if len(observed) == 0 {
+		return []string{fmt.Sprintf("Issue 来源仓库 `%s` 不在当前观测边界内", issueRepo)}
+	}
+	return []string{
+		fmt.Sprintf(
+			"Issue 来源仓库 `%s` 不在当前观测边界内；当前仅观察 `%s`",
+			issueRepo,
+			strings.Join(observed, "`, `"),
+		),
+	}
+}
+
 func (rt *Runtime) Ingest(ctx context.Context) error {
 	defer rt.store.Close()
-	repos := rt.issueSourceRepos()
-	rt.logInfo("ingest", "开始同步 open issues", "repo_count", len(repos), "log_level", rt.runtimeLogLevel())
+	repos := rt.observedIssueRepos()
+	rt.logInfo(
+		"ingest",
+		"开始同步 open issues",
+		"issue_source_repo_count",
+		len(repos),
+		"target_repo_count",
+		len(rt.cfg.EnabledTargets()),
+		"control_repo",
+		rt.cfg.GitHub.ControlRepo,
+		"log_level",
+		rt.runtimeLogLevel(),
+	)
 	seen := make(map[string]struct{})
 	for _, repo := range repos {
 		issues, err := rt.clientForRepo(repo).ListOpenIssues(rt.cfg.GitHub.IssueLabel, rt.cfg.GitHub.Limit)
@@ -1429,7 +1471,8 @@ func (rt *Runtime) syncIssue(ctx context.Context, issue github.Issue, fromRun bo
 	targetRepo, routeReasons := rt.resolveTargetRepo(issueRepo, issue.Body)
 	taskClass := core.InferTaskClass(issue.Title, issue.Body, github.LabelNames(issue.Labels))
 	rt.logDebug("issue", "完成 Issue 评估", "issue", rt.issueRef(issueRepo, issue.Number), "from_run", fromRun, "trusted", trusted, "permission", permission, "approved", approved, "task_class", taskClass, "target_repo", targetRepo)
-	blockReasons := make([]string, 0, 2)
+	blockReasons := make([]string, 0, 3)
+	blockReasons = append(blockReasons, rt.issueObservationBlockReasons(issueRepo)...)
 	if !strings.EqualFold(strings.TrimSpace(issue.State), "open") {
 		blockReasons = append(blockReasons, fmt.Sprintf("Issue 当前状态为 `%s`，等待人工重新打开", issue.State))
 	}
@@ -2278,7 +2321,14 @@ func appendTaskTemplatePrompt(sb *strings.Builder, task *core.Task) {
 
 func (rt *Runtime) describeTargetRouting() string {
 	enabled := rt.cfg.EnabledTargets()
-	return fmt.Sprintf("enabled=%d default_target=%s", len(enabled), displayTargetRepo(rt.cfg.DefaultTarget))
+	observed := rt.observedIssueRepos()
+	return fmt.Sprintf(
+		"enabled_targets=%d observed_issue_repos=%d control_repo=%s default_target=%s",
+		len(enabled),
+		len(observed),
+		displayTargetRepo(strings.TrimSpace(rt.cfg.GitHub.ControlRepo)),
+		displayTargetRepo(rt.cfg.DefaultTarget),
+	)
 }
 
 func (rt *Runtime) describeExecutor() string {

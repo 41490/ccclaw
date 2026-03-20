@@ -8,7 +8,9 @@ default_target = ""
 [github]
 control_repo = "41490/ccclaw"
 issue_label = "ccclaw"
-# ingest 每轮会在 control_repo 与所有启用 target repo 中分别拉取 open issues。
+# ingest 每轮只观察两类 Issue 来源仓库：
+# - 官方 control_repo
+# - 每个已启用 [[targets]].repo（这些仓库可直接承载对应 target 的 Issue）
 # - 只统计匹配 issue_label 的 Issue
 # - 不是并发数，也不是 run 阶段的执行上限
 limit = 20
