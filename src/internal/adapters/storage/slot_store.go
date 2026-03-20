@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const globalRepoSlotFileName = "global_sidecar.json"
+
 type RepoSlotPhase string
 
 const (
@@ -123,14 +125,22 @@ func newRepoSlotStore(varDir string) *RepoSlotStore {
 
 func (s *RepoSlotStore) Get(targetRepo string) (*RepoSlot, error) {
 	targetRepo = strings.TrimSpace(targetRepo)
-	if targetRepo == "" {
+	slot, err := s.GetActive()
+	if err != nil || slot == nil {
+		return slot, err
+	}
+	if targetRepo != "" && !strings.EqualFold(targetRepo, slot.TargetRepo) {
 		return nil, nil
 	}
-	path := s.slotPath(targetRepo)
+	return slot, nil
+}
+
+func (s *RepoSlotStore) GetActive() (*RepoSlot, error) {
+	path := s.slotPath()
 	lockPath := path + ".lock"
 	var slot *RepoSlot
 	err := withFileLock(lockPath, func() error {
-		loaded, err := s.loadUnlocked(path)
+		loaded, err := s.loadActiveUnlocked()
 		if err != nil {
 			return err
 		}
@@ -144,90 +154,73 @@ func (s *RepoSlotStore) Get(targetRepo string) (*RepoSlot, error) {
 }
 
 func (s *RepoSlotStore) List() ([]*RepoSlot, error) {
-	root := s.slotDir()
-	entries, err := os.ReadDir(root)
+	slot, err := s.GetActive()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("读取仓库槽位目录失败: %w", err)
+		return nil, err
 	}
-	items := make([]*RepoSlot, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		path := filepath.Join(root, entry.Name())
-		slot, err := s.loadUnlocked(path)
-		if err != nil {
-			return nil, err
-		}
-		if slot != nil {
-			items = append(items, slot)
-		}
+	if slot == nil {
+		return nil, nil
 	}
-	sort.Slice(items, func(i, j int) bool {
-		if !items[i].UpdatedAt.Equal(items[j].UpdatedAt) {
-			return items[i].UpdatedAt.Before(items[j].UpdatedAt)
-		}
-		return items[i].TargetRepo < items[j].TargetRepo
-	})
-	return items, nil
+	return []*RepoSlot{slot}, nil
 }
 
 func (s *RepoSlotStore) Upsert(slot *RepoSlot) error {
 	if slot == nil {
-		return errors.New("repo slot 不能为空")
+		return errors.New("全局 sidecar 不能为空")
 	}
 	slot.TargetRepo = strings.TrimSpace(slot.TargetRepo)
 	if slot.TargetRepo == "" {
-		return errors.New("repo slot target_repo 不能为空")
+		return errors.New("全局 sidecar target_repo 不能为空")
 	}
-	path := s.slotPath(slot.TargetRepo)
+	path := s.slotPath()
 	lockPath := path + ".lock"
 	return withFileLock(lockPath, func() error {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return fmt.Errorf("创建仓库槽位目录失败: %w", err)
+			return fmt.Errorf("创建全局 sidecar 目录失败: %w", err)
 		}
 		slot.UpdatedAt = time.Now().UTC()
 		encoded, err := json.MarshalIndent(slot, "", "  ")
 		if err != nil {
-			return fmt.Errorf("序列化仓库槽位失败: %w", err)
+			return fmt.Errorf("序列化全局 sidecar 失败: %w", err)
 		}
 		tmp, err := os.CreateTemp(filepath.Dir(path), "slot-*.json")
 		if err != nil {
-			return fmt.Errorf("创建仓库槽位临时文件失败: %w", err)
+			return fmt.Errorf("创建全局 sidecar 临时文件失败: %w", err)
 		}
 		tmpPath := tmp.Name()
 		if _, err := tmp.Write(encoded); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmpPath)
-			return fmt.Errorf("写入仓库槽位临时文件失败: %w", err)
+			return fmt.Errorf("写入全局 sidecar 临时文件失败: %w", err)
 		}
 		if err := tmp.Close(); err != nil {
 			_ = os.Remove(tmpPath)
-			return fmt.Errorf("关闭仓库槽位临时文件失败: %w", err)
+			return fmt.Errorf("关闭全局 sidecar 临时文件失败: %w", err)
 		}
 		if err := os.Rename(tmpPath, path); err != nil {
 			_ = os.Remove(tmpPath)
-			return fmt.Errorf("替换仓库槽位失败: %w", err)
+			return fmt.Errorf("替换全局 sidecar 失败: %w", err)
 		}
-		return nil
+		return s.cleanupLegacySlotsUnlocked()
 	})
 }
 
 func (s *RepoSlotStore) Delete(targetRepo string) error {
-	targetRepo = strings.TrimSpace(targetRepo)
-	if targetRepo == "" {
-		return nil
-	}
-	path := s.slotPath(targetRepo)
+	path := s.slotPath()
 	lockPath := path + ".lock"
 	return withFileLock(lockPath, func() error {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("删除仓库槽位失败: %w", err)
+		slot, err := s.loadActiveUnlocked()
+		if err != nil {
+			return err
 		}
-		return nil
+		targetRepo = strings.TrimSpace(targetRepo)
+		if targetRepo != "" && slot != nil && !strings.EqualFold(targetRepo, slot.TargetRepo) {
+			return nil
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("删除全局 sidecar 失败: %w", err)
+		}
+		return s.cleanupLegacySlotsUnlocked()
 	})
 }
 
@@ -237,14 +230,14 @@ func (s *RepoSlotStore) loadUnlocked(path string) (*RepoSlot, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("读取仓库槽位失败: %w", err)
+		return nil, fmt.Errorf("读取 sidecar 失败: %w", err)
 	}
 	if len(data) == 0 {
 		return nil, nil
 	}
 	var slot RepoSlot
 	if err := json.Unmarshal(data, &slot); err != nil {
-		return nil, fmt.Errorf("解析仓库槽位失败: %w", err)
+		return nil, fmt.Errorf("解析 sidecar 失败: %w", err)
 	}
 	slot.TargetRepo = strings.TrimSpace(slot.TargetRepo)
 	if slot.TargetRepo == "" {
@@ -254,12 +247,112 @@ func (s *RepoSlotStore) loadUnlocked(path string) (*RepoSlot, error) {
 	return &slot, nil
 }
 
+func (s *RepoSlotStore) loadActiveUnlocked() (*RepoSlot, error) {
+	path := s.slotPath()
+	slot, err := s.loadUnlocked(path)
+	if err != nil || slot != nil {
+		return slot, err
+	}
+	legacy, legacyPath, err := s.loadLegacySlotUnlocked()
+	if err != nil || legacy == nil {
+		return legacy, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("创建全局 sidecar 目录失败: %w", err)
+	}
+	payload, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("序列化迁移 sidecar 失败: %w", err)
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		return nil, fmt.Errorf("写入迁移 sidecar 失败: %w", err)
+	}
+	if err := os.Remove(legacyPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("清理旧版 repo sidecar 失败: %w", err)
+	}
+	return legacy, nil
+}
+
+func (s *RepoSlotStore) loadLegacySlotUnlocked() (*RepoSlot, string, error) {
+	paths, err := s.legacySlotPathsUnlocked()
+	if err != nil {
+		return nil, "", err
+	}
+	type legacyItem struct {
+		path string
+		slot *RepoSlot
+	}
+	items := make([]legacyItem, 0, len(paths))
+	for _, path := range paths {
+		slot, err := s.loadUnlocked(path)
+		if err != nil {
+			return nil, "", err
+		}
+		if slot != nil {
+			items = append(items, legacyItem{path: path, slot: slot})
+		}
+	}
+	if len(items) == 0 {
+		return nil, "", nil
+	}
+	if len(items) > 1 {
+		sort.Slice(items, func(i, j int) bool {
+			if !items[i].slot.UpdatedAt.Equal(items[j].slot.UpdatedAt) {
+				return items[i].slot.UpdatedAt.After(items[j].slot.UpdatedAt)
+			}
+			return items[i].slot.TargetRepo < items[j].slot.TargetRepo
+		})
+		summaries := make([]string, 0, len(items))
+		for _, item := range items {
+			summaries = append(summaries, fmt.Sprintf("%s(task=%s,repo=%s,updated_at=%s)", filepath.Base(item.path), item.slot.TaskID, item.slot.TargetRepo, item.slot.UpdatedAt.Format(time.RFC3339)))
+		}
+		return nil, "", fmt.Errorf("检测到多个旧版 repo sidecar，无法自动迁移到全局唯一 sidecar: %s", strings.Join(summaries, ", "))
+	}
+	return items[0].slot, items[0].path, nil
+}
+
+func (s *RepoSlotStore) cleanupLegacySlotsUnlocked() error {
+	paths, err := s.legacySlotPathsUnlocked()
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("清理旧版 repo sidecar 失败: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *RepoSlotStore) legacySlotPathsUnlocked() ([]string, error) {
+	root := s.slotDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("读取 sidecar 目录失败: %w", err)
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if entry.Name() == globalRepoSlotFileName {
+			continue
+		}
+		paths = append(paths, filepath.Join(root, entry.Name()))
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
 func (s *RepoSlotStore) slotDir() string {
 	return filepath.Join(s.varDir, "runtime")
 }
 
-func (s *RepoSlotStore) slotPath(targetRepo string) string {
-	return filepath.Join(s.slotDir(), sanitizeRepoKey(targetRepo)+".json")
+func (s *RepoSlotStore) slotPath() string {
+	return filepath.Join(s.slotDir(), globalRepoSlotFileName)
 }
 
 func sanitizeRepoKey(targetRepo string) string {

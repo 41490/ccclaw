@@ -569,7 +569,7 @@ func (rt *Runtime) StatusWithOptions(out io.Writer, options StatusOptions) error
 	sessionSnapshot := rt.collectStatusSessions(tasks)
 	slotSnapshot, err := rt.collectStatusRepoSlots()
 	if err != nil {
-		rt.logError("status", "读取仓库槽位失败", "error", err)
+		rt.logError("status", "读取全局 sidecar 失败", "error", err)
 		return err
 	}
 	execSnapshot := rt.executorSnapshot()
@@ -682,6 +682,8 @@ type statusRepoSlotItem struct {
 }
 
 type statusRepoSlotSnapshot struct {
+	Model  string               `json:"model,omitempty"`
+	Scope  string               `json:"scope,omitempty"`
 	Total  int                  `json:"total"`
 	Counts map[string]int       `json:"counts"`
 	Items  []statusRepoSlotItem `json:"items"`
@@ -858,7 +860,11 @@ func (rt *Runtime) collectStatusSessions(tasks []*core.Task) statusSessionSnapsh
 }
 
 func (rt *Runtime) collectStatusRepoSlots() (statusRepoSlotSnapshot, error) {
-	snapshot := statusRepoSlotSnapshot{Counts: map[string]int{}}
+	snapshot := statusRepoSlotSnapshot{
+		Model:  "global_sidecar",
+		Scope:  "singleton",
+		Counts: map[string]int{},
+	}
 	slots, err := rt.store.ListRepoSlots()
 	if err != nil {
 		return snapshot, err
@@ -1039,10 +1045,11 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 	}
 	_, _ = fmt.Fprintln(out)
 
-	_, _ = fmt.Fprintln(out, "仓位快照:")
-	_, _ = fmt.Fprintf(out, "  仓位总数: %d\n", snapshot.Slots.Total)
+	_, _ = fmt.Fprintln(out, "全局 sidecar 快照:")
+	_, _ = fmt.Fprintf(out, "  sidecar 模型: %s (%s)\n", emptyStatusValue(snapshot.Slots.Model), emptyStatusValue(snapshot.Slots.Scope))
+	_, _ = fmt.Fprintf(out, "  sidecar 总数: %d\n", snapshot.Slots.Total)
 	if snapshot.Slots.Total == 0 {
-		_, _ = fmt.Fprintln(out, "  当前无仓位")
+		_, _ = fmt.Fprintln(out, "  当前无活动 sidecar")
 	} else {
 		order := []string{
 			string(storage.RepoSlotPhaseRunning),

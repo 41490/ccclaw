@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +82,102 @@ func TestStorePersistsLastSessionIDAndTokenStats(t *testing.T) {
 	}
 	if stats[0].IssueNumber != 10 || stats[0].LastSessionID != "sess-10" {
 		t.Fatalf("unexpected task stat: %#v", stats[0])
+	}
+}
+
+func TestStoreMigratesLegacyRepoSlotToGlobalSidecar(t *testing.T) {
+	varDir := filepath.Join(t.TempDir(), "var")
+	store, err := Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	legacy := &RepoSlot{
+		TargetRepo:   "41490/ccclaw",
+		TaskID:       "21#body",
+		ExecutorMode: "daemon",
+		Phase:        RepoSlotPhaseFinalizing,
+		CurrentStep:  "sync_home",
+		UpdatedAt:    time.Date(2026, 3, 19, 15, 0, 0, 0, time.UTC),
+	}
+	payload, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("序列化 legacy sidecar 失败: %v", err)
+	}
+	legacyPath := filepath.Join(varDir, "runtime", sanitizeRepoKey(legacy.TargetRepo)+".json")
+	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+		t.Fatalf("创建 runtime 目录失败: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, payload, 0o644); err != nil {
+		t.Fatalf("写入 legacy sidecar 失败: %v", err)
+	}
+
+	loaded, err := store.GetActiveRepoSlot()
+	if err != nil {
+		t.Fatalf("迁移 legacy sidecar 失败: %v", err)
+	}
+	if loaded == nil || loaded.TaskID != legacy.TaskID || loaded.TargetRepo != legacy.TargetRepo {
+		t.Fatalf("unexpected active sidecar: %#v", loaded)
+	}
+
+	activePath := filepath.Join(varDir, "runtime", globalRepoSlotFileName)
+	if _, err := os.Stat(activePath); err != nil {
+		t.Fatalf("预期已写入全局 sidecar，实际错误: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("预期 legacy sidecar 已被回收，实际错误: %v", err)
+	}
+
+	compat, err := store.GetRepoSlot(legacy.TargetRepo)
+	if err != nil {
+		t.Fatalf("兼容读取迁移后 sidecar 失败: %v", err)
+	}
+	if compat == nil || compat.TaskID != legacy.TaskID {
+		t.Fatalf("unexpected compat sidecar: %#v", compat)
+	}
+}
+
+func TestStoreRejectsAmbiguousLegacyRepoSlotsDuringMigration(t *testing.T) {
+	varDir := filepath.Join(t.TempDir(), "var")
+	store, err := Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	cases := []*RepoSlot{
+		{
+			TargetRepo: "41490/repo-a",
+			TaskID:     "91#a",
+			Phase:      RepoSlotPhaseRunning,
+			UpdatedAt:  time.Date(2026, 3, 19, 16, 0, 0, 0, time.UTC),
+		},
+		{
+			TargetRepo: "41490/repo-b",
+			TaskID:     "91#b",
+			Phase:      RepoSlotPhaseFinalizeFailed,
+			UpdatedAt:  time.Date(2026, 3, 19, 16, 5, 0, 0, time.UTC),
+		},
+	}
+	runtimeDir := filepath.Join(varDir, "runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("创建 runtime 目录失败: %v", err)
+	}
+	for _, item := range cases {
+		payload, err := json.MarshalIndent(item, "", "  ")
+		if err != nil {
+			t.Fatalf("序列化 legacy sidecar 失败: %v", err)
+		}
+		path := filepath.Join(runtimeDir, sanitizeRepoKey(item.TargetRepo)+".json")
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatalf("写入 legacy sidecar 失败: %v", err)
+		}
+	}
+
+	loaded, err := store.GetActiveRepoSlot()
+	if err == nil || !strings.Contains(err.Error(), "多个旧版 repo sidecar") {
+		t.Fatalf("预期显式识别多 legacy sidecar，loaded=%#v err=%v", loaded, err)
 	}
 }
 

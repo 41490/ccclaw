@@ -26,25 +26,25 @@ const (
 )
 
 func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOnly bool) error {
-	advanced, err := rt.advanceRepoSlots(ctx)
+	advancedCount, err := rt.advanceRepoSlots(ctx)
 	if err != nil {
 		return err
 	}
 	if dispatchOnly {
-		return rt.dispatchNextSingleFlight(ctx, out, advanced)
+		return rt.dispatchNextSingleFlight(ctx, out, advancedCount)
 	}
-	return rt.dispatchNextSingleFlight(ctx, out, advanced)
+	return rt.dispatchNextSingleFlight(ctx, out, advancedCount)
 }
 
-func (rt *Runtime) advanceRepoSlots(ctx context.Context) (map[string]struct{}, error) {
+func (rt *Runtime) advanceRepoSlots(ctx context.Context) (int, error) {
 	if err := rt.hydrateRepoSlots(); err != nil {
-		return nil, err
+		return 0, err
 	}
 	slots, err := rt.store.ListRepoSlots()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	advanced := map[string]struct{}{}
+	advancedCount := 0
 	for _, slot := range slots {
 		if slot == nil {
 			continue
@@ -56,17 +56,30 @@ func (rt *Runtime) advanceRepoSlots(ctx context.Context) (map[string]struct{}, e
 		}
 		execEngine, err := rt.newExecutorForMode(mode)
 		if err != nil {
-			return nil, err
+			return 0, err
 		}
-		advanced[slot.TargetRepo] = struct{}{}
 		if err := rt.advanceRepoSlot(ctx, execEngine, slot, mode); err != nil {
-			return nil, err
+			return 0, err
 		}
+		advancedCount++
 	}
-	return advanced, nil
+	return advancedCount, nil
 }
 
 func (rt *Runtime) hydrateRepoSlots() error {
+	slot, err := rt.store.GetActiveRepoSlot()
+	if err != nil {
+		return err
+	}
+	if slot != nil && strings.TrimSpace(slot.TaskID) != "" {
+		if strings.TrimSpace(slot.ExecutorMode) == "" {
+			slot.ExecutorMode = string(rt.cfg.ExecutorModeForRepo(slot.TargetRepo))
+			if err := rt.store.UpsertRepoSlot(slot); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	tasks, err := rt.store.ListTasks()
 	if err != nil {
 		return err
@@ -78,24 +91,11 @@ func (rt *Runtime) hydrateRepoSlots() error {
 		if task.State != core.StateRunning && task.State != core.StateFinalizing {
 			continue
 		}
-		slot, err := rt.store.GetRepoSlot(task.TargetRepo)
-		if err != nil {
-			return err
-		}
-		if slot != nil && strings.TrimSpace(slot.TaskID) != "" {
-			if strings.TrimSpace(slot.ExecutorMode) == "" {
-				slot.ExecutorMode = string(rt.cfg.ExecutorModeForRepo(task.TargetRepo))
-				if err := rt.store.UpsertRepoSlot(slot); err != nil {
-					return err
-				}
-			}
-			continue
-		}
 		phase := storage.RepoSlotPhaseRunning
 		if task.State == core.StateFinalizing {
 			phase = storage.RepoSlotPhaseFinalizing
 		}
-		if err := rt.store.UpsertRepoSlot(&storage.RepoSlot{
+		return rt.store.UpsertRepoSlot(&storage.RepoSlot{
 			TargetRepo:    task.TargetRepo,
 			TaskID:        task.TaskID,
 			ExecutorMode:  string(rt.cfg.ExecutorModeForRepo(task.TargetRepo)),
@@ -104,9 +104,7 @@ func (rt *Runtime) hydrateRepoSlots() error {
 			CurrentStep:   defaultSlotStepForTask(task.State),
 			LastAdvanceAt: time.Now().UTC(),
 			LastProbeAt:   time.Now().UTC(),
-		}); err != nil {
-			return err
-		}
+		})
 	}
 	return nil
 }
@@ -175,20 +173,20 @@ func (rt *Runtime) refreshRunningRepoSlot(execEngine *executor.Executor, slot *s
 	return nil
 }
 
-func (rt *Runtime) dispatchNextSingleFlight(ctx context.Context, out io.Writer, advanced map[string]struct{}) error {
+func (rt *Runtime) dispatchNextSingleFlight(ctx context.Context, out io.Writer, advancedCount int) error {
 	slots, err := rt.store.ListRepoSlots()
 	if err != nil {
 		return err
 	}
 	if len(slots) > 0 {
 		if out != nil {
-			_, _ = fmt.Fprintf(out, "当前已有 %d 个活动槽位，本轮保持全局单飞串行\n", len(slots))
+			_, _ = fmt.Fprintf(out, "当前已有 %d 个全局 sidecar，本轮保持全局单飞串行\n", len(slots))
 		}
 		return nil
 	}
-	if len(advanced) > 0 {
+	if advancedCount > 0 {
 		if out != nil {
-			_, _ = fmt.Fprintf(out, "本轮已推进 %d 个槽位，继续保持全局单飞串行\n", len(advanced))
+			_, _ = fmt.Fprintf(out, "本轮已推进 %d 个全局 sidecar，继续保持全局单飞串行\n", advancedCount)
 		}
 		return nil
 	}
@@ -354,7 +352,7 @@ func (rt *Runtime) finalizeRepoSlot(ctx context.Context, execEngine *executor.Ex
 		return err
 	}
 	if task == nil {
-		return rt.store.DeleteRepoSlot(slot.TargetRepo)
+		return rt.store.DeleteActiveRepoSlot()
 	}
 	result, runErr := execEngine.LoadResult(task.TaskID)
 	result = enrichDiagnosticResult(execEngine, task.TaskID, result)
@@ -424,7 +422,7 @@ func (rt *Runtime) failTaskExecution(task *core.Task, result *executor.Result, r
 	}
 	_ = rt.store.AppendEvent(updated.TaskID, eventType, updated.ErrorMsg)
 	rt.reportFailure(updated)
-	return rt.store.DeleteRepoSlot(updated.TargetRepo)
+	return rt.store.DeleteActiveRepoSlot()
 }
 
 func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, result *executor.Result, slot *storage.RepoSlot) error {
@@ -450,7 +448,7 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 		return err
 	}
 	if updated == nil {
-		return rt.store.DeleteRepoSlot(task.TargetRepo)
+		return rt.store.DeleteActiveRepoSlot()
 	}
 	if slot == nil {
 		slot = &storage.RepoSlot{
@@ -517,7 +515,7 @@ func (rt *Runtime) completeTaskFinalizing(ctx context.Context, task *core.Task, 
 		return err
 	}
 	_ = rt.store.AppendEvent(updated.TaskID, core.EventDone, "任务执行完成")
-	return rt.store.DeleteRepoSlot(updated.TargetRepo)
+	return rt.store.DeleteActiveRepoSlot()
 }
 
 func (rt *Runtime) reportFinalizeRecovery(task *core.Task, slot *storage.RepoSlot) error {
@@ -789,7 +787,7 @@ func (rt *Runtime) patrolRepoSlots(ctx context.Context, execEngine *executor.Exe
 			return err
 		}
 		if task == nil {
-			if err := rt.store.DeleteRepoSlot(slot.TargetRepo); err != nil {
+			if err := rt.store.DeleteActiveRepoSlot(); err != nil {
 				return err
 			}
 			continue

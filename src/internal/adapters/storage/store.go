@@ -232,6 +232,10 @@ func (s *Store) GetRepoSlot(targetRepo string) (*RepoSlot, error) {
 	return s.slots.Get(targetRepo)
 }
 
+func (s *Store) GetActiveRepoSlot() (*RepoSlot, error) {
+	return s.slots.GetActive()
+}
+
 func (s *Store) ListRepoSlots() ([]*RepoSlot, error) {
 	return s.slots.List()
 }
@@ -242,6 +246,10 @@ func (s *Store) UpsertRepoSlot(slot *RepoSlot) error {
 
 func (s *Store) DeleteRepoSlot(targetRepo string) error {
 	return s.slots.Delete(targetRepo)
+}
+
+func (s *Store) DeleteActiveRepoSlot() error {
+	return s.slots.Delete("")
 }
 
 func (s *Store) AppendEventAt(taskID string, eventType core.EventType, detail string, createdAt time.Time) error {

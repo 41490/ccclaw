@@ -1264,7 +1264,9 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 			Counts map[string]int `json:"counts"`
 		} `json:"tasks"`
 		Slots struct {
-			Total int `json:"total"`
+			Model string `json:"model"`
+			Scope string `json:"scope"`
+			Total int    `json:"total"`
 			Items []struct {
 				Phase              string `json:"phase"`
 				CurrentStep        string `json:"current_step"`
@@ -1281,6 +1283,9 @@ func TestStatusJSONIncludesRepoSlotsAndFinalizingTask(t *testing.T) {
 	}
 	if payload.Tasks.Counts[string(core.StateFinalizing)] != 1 {
 		t.Fatalf("expected FINALIZING count in %+v", payload.Tasks.Counts)
+	}
+	if payload.Slots.Model != "global_sidecar" || payload.Slots.Scope != "singleton" {
+		t.Fatalf("unexpected slot model payload: %+v", payload.Slots)
 	}
 	if payload.Slots.Total != 1 || len(payload.Slots.Items) != 1 {
 		t.Fatalf("unexpected slots payload: %+v", payload.Slots)
@@ -1791,6 +1796,9 @@ func TestStatusWithoutTasksStillShowsSnapshot(t *testing.T) {
 	text := out.String()
 	for _, want := range []string{
 		"当前快照",
+		"全局 sidecar 快照:",
+		"sidecar 模型: global_sidecar (singleton)",
+		"当前无活动 sidecar",
 		"任务总数: 0",
 		"执行器快照:",
 		"入口配置: claude",
