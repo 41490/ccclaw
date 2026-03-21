@@ -161,6 +161,7 @@ echo "- 程序发布树: $([[ "$UPGRADE_PROGRAM" == "1" ]] && echo enabled || ec
 echo "- Claude 安装: $([[ "$UPGRADE_CLAUDE" == "1" ]] && echo enabled || echo skipped)"
 echo "- Claude 资产自动刷新: disabled(默认只读策略，已停用)"
 echo "- 本体仓库保护: 不覆盖用户记忆；仅无损刷新关键 kb/CLAUDE.md 受管区块"
+echo "- jj / Skill 基线: 升级时刷新受管 Skill，并补齐 jj colocated / 默认 bookmark 跟踪"
 echo "- 当前程序目录: $APP_DIR"
 echo "- 当前本体仓库: $HOME_REPO"
 

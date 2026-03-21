@@ -289,6 +289,9 @@ printf '{}'
 	}
 	text := string(payload)
 	for _, want := range []string{
+		"业务执行: `成功`",
+		"收尾同步: `失败`",
+		"生命周期: `未写回 DONE`",
 		"当前失败步骤: `sync_target`（目标仓同步）",
 		"失败类型: `protection`（分支保护）",
 		"处理策略: `pause`（需人工介入）",

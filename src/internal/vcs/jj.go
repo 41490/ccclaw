@@ -1,12 +1,14 @@
 package vcs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -16,6 +18,8 @@ var (
 	ErrCapabilityMismatch = errors.New("jj/git 能力不兼容")
 	ErrUnsupportedGit     = errors.New("git 缺少 jj 同步所需能力")
 	ErrConflict           = errors.New("jj rebase 产生冲突，需人工解决")
+	ErrDirtyWorkingCopy   = errors.New("jj 工作区存在本地变更，需人工处理")
+	ErrOversizeUntracked  = errors.New("jj 工作区存在运行态未跟踪产物噪音，需清理或忽略")
 	ErrPushFailed         = errors.New("jj git push 重试耗尽")
 	ErrGitTooOld          = errors.New("git 版本过低，不满足 jj 同步要求")
 	ErrSyncNetwork        = errors.New("仓库同步网络异常")
@@ -53,12 +57,47 @@ type SyncCommandError struct {
 	Detail    string
 }
 
+type CommandDiagnostic struct {
+	Command    string    `json:"command"`
+	WorkDir    string    `json:"work_dir,omitempty"`
+	ExitCode   int       `json:"exit_code"`
+	Stdout     string    `json:"stdout,omitempty"`
+	Stderr     string    `json:"stderr,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	DurationMS int64     `json:"duration_ms"`
+}
+
+type SyncReport struct {
+	RepoPath        string              `json:"repo_path"`
+	Message         string              `json:"message,omitempty"`
+	Remote          string              `json:"remote,omitempty"`
+	Bookmark        string              `json:"bookmark,omitempty"`
+	Attempts        int                 `json:"attempts,omitempty"`
+	FailureClass    string              `json:"failure_class,omitempty"`
+	Error           string              `json:"error,omitempty"`
+	StartedAt       time.Time           `json:"started_at"`
+	FinishedAt      time.Time           `json:"finished_at"`
+	DurationMS      int64               `json:"duration_ms"`
+	Commands        []CommandDiagnostic `json:"commands,omitempty"`
+	ConflictChecked bool                `json:"conflict_checked,omitempty"`
+	ConflictFound   bool                `json:"conflict_found,omitempty"`
+	StatusChecked   bool                `json:"status_checked,omitempty"`
+	StatusSummary   string              `json:"status_summary,omitempty"`
+}
+
 func (e *SyncCommandError) Error() string {
 	if e == nil {
 		return ""
 	}
 	reason := ErrSyncUnknown.Error()
 	switch {
+	case errors.Is(e.Reason, ErrConflict):
+		reason = ErrConflict.Error()
+	case errors.Is(e.Reason, ErrDirtyWorkingCopy):
+		reason = ErrDirtyWorkingCopy.Error()
+	case errors.Is(e.Reason, ErrOversizeUntracked):
+		reason = ErrOversizeUntracked.Error()
 	case errors.Is(e.Reason, ErrSyncNetwork):
 		reason = ErrSyncNetwork.Error()
 	case errors.Is(e.Reason, ErrSyncAuth):
@@ -172,9 +211,26 @@ func (e *SyncCapabilityError) Is(target error) bool {
 
 // SyncRepo 使用 jj 在本地提交并尽力同步远端。
 func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
+	_, err := SyncRepoWithReport(repoPath, message, paths, maxRetry)
+	return err
+}
+
+// SyncRepoWithReport 在同步仓库时保留原始命令与输出，供 FINALIZING 诊断落盘。
+func SyncRepoWithReport(repoPath, message string, paths []string, maxRetry int) (*SyncReport, error) {
+	report := &SyncReport{
+		RepoPath:  filepath.Clean(strings.TrimSpace(repoPath)),
+		Message:   strings.TrimSpace(message),
+		StartedAt: time.Now().UTC(),
+		Commands:  make([]CommandDiagnostic, 0, 8),
+	}
+	defer finalizeSyncReport(report)
+
 	repoPath = filepath.Clean(strings.TrimSpace(repoPath))
 	if repoPath == "" {
-		return errors.New("仓库路径不能为空")
+		err := errors.New("仓库路径不能为空")
+		report.Error = err.Error()
+		report.FailureClass = syncFailureClass(err)
+		return report, err
 	}
 	if strings.TrimSpace(message) == "" {
 		message = "ccclaw sync"
@@ -183,39 +239,63 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 		maxRetry = defaultMaxRetry
 	}
 	if _, err := exec.LookPath("jj"); err != nil {
-		return ErrJJNotAvailable
+		report.Error = ErrJJNotAvailable.Error()
+		report.FailureClass = syncFailureClass(ErrJJNotAvailable)
+		return report, ErrJJNotAvailable
 	}
 	if err := os.MkdirAll(repoPath, 0o755); err != nil {
-		return fmt.Errorf("创建仓库目录失败: %w", err)
+		wrapped := fmt.Errorf("创建仓库目录失败: %w", err)
+		report.Error = wrapped.Error()
+		report.FailureClass = syncFailureClass(wrapped)
+		return report, wrapped
 	}
-	if err := ensureJJRepo(repoPath); err != nil {
-		return err
+	if err := ensureJJRepo(report, repoPath); err != nil {
+		report.Error = err.Error()
+		report.FailureClass = syncFailureClass(err)
+		return report, err
 	}
 
 	normalizedPaths, err := normalizePaths(repoPath, paths)
 	if err != nil {
-		return err
+		report.Error = err.Error()
+		report.FailureClass = syncFailureClass(err)
+		return report, err
 	}
 	bookmark := detectPrimaryBookmark(repoPath)
 	remote := detectRemote(repoPath)
+	report.Bookmark = bookmark
+	report.Remote = remote
 	if remote == "" {
-		if err := trackPaths(repoPath, normalizedPaths); err != nil {
-			return err
+		if err := trackPaths(report, repoPath, normalizedPaths); err != nil {
+			report.Error = err.Error()
+			report.FailureClass = syncFailureClass(err)
+			return report, err
 		}
-		_, err := commitChanges(repoPath, message, normalizedPaths)
-		return err
+		_, err := commitChanges(report, repoPath, message, normalizedPaths)
+		if err != nil {
+			report.Error = err.Error()
+			report.FailureClass = syncFailureClass(err)
+			return report, err
+		}
+		report.FailureClass = "ok"
+		return report, nil
 	}
 	probe, err := ensureSyncCapabilities()
 	if err != nil {
-		return err
+		report.Error = err.Error()
+		report.FailureClass = syncFailureClass(err)
+		return report, err
 	}
 
 	var lastErr error
 	lastOp := ""
 	for attempt := 1; attempt <= maxRetry; attempt++ {
-		if err := runJJ(repoPath, "git", "fetch", "--remote", remote); err != nil {
+		report.Attempts = attempt
+		if err := runJJ(report, repoPath, "git", "fetch", "--remote", remote); err != nil {
 			if capabilityErr := classifyCapabilityMismatch(err, probe, "jj git fetch --remote "+remote); capabilityErr != nil {
-				return capabilityErr
+				report.Error = capabilityErr.Error()
+				report.FailureClass = syncFailureClass(capabilityErr)
+				return report, capabilityErr
 			}
 			classified := classifySyncCommandError("fetch", err)
 			if classified != nil {
@@ -224,41 +304,63 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 				if errors.Is(classified, ErrSyncNetwork) {
 					continue
 				}
-				return classified
+				report.Error = classified.Error()
+				report.FailureClass = syncFailureClass(classified)
+				return report, classified
 			}
 			lastErr = fmt.Errorf("拉取远端失败(第 %d/%d 次): %w", attempt, maxRetry, err)
 			lastOp = "fetch"
 			continue
 		}
 		if remoteBookmarkExists(repoPath, remote, bookmark) {
-			if err := runJJ(repoPath, "rebase", "-d", fmt.Sprintf("%s@%s", bookmark, remote)); err != nil {
-				lastErr = fmt.Errorf("rebase 到 %s@%s 失败(第 %d/%d 次): %w", bookmark, remote, attempt, maxRetry, err)
-				lastOp = "rebase"
-				continue
+			if err := runJJ(report, repoPath, "rebase", "-d", fmt.Sprintf("%s@%s", bookmark, remote)); err != nil {
+				classified := classifyRebaseFailure(report, repoPath, err, bookmark, remote)
+				if errors.Is(classified, ErrSyncNetwork) {
+					lastErr = classified
+					lastOp = "rebase"
+					continue
+				}
+				report.Error = classified.Error()
+				report.FailureClass = syncFailureClass(classified)
+				return report, classified
 			}
-			conflicted, err := hasConflicts(repoPath)
+			conflicted, err := hasConflicts(report, repoPath)
 			if err != nil {
-				return err
+				report.Error = err.Error()
+				report.FailureClass = syncFailureClass(err)
+				return report, err
 			}
 			if conflicted {
-				return fmt.Errorf("%w: %s", ErrConflict, repoPath)
+				classified := &SyncCommandError{Operation: "rebase", Reason: ErrConflict, Detail: repoPath}
+				report.Error = classified.Error()
+				report.FailureClass = syncFailureClass(classified)
+				return report, classified
 			}
 		}
-		if err := trackPaths(repoPath, normalizedPaths); err != nil {
-			return err
+		if err := trackPaths(report, repoPath, normalizedPaths); err != nil {
+			report.Error = err.Error()
+			report.FailureClass = syncFailureClass(err)
+			return report, err
 		}
-		committed, err := commitChanges(repoPath, message, normalizedPaths)
+		committed, err := commitChanges(report, repoPath, message, normalizedPaths)
 		if err != nil {
-			return err
+			report.Error = err.Error()
+			report.FailureClass = syncFailureClass(err)
+			return report, err
 		}
 		if committed {
-			if err := runJJ(repoPath, "bookmark", "set", bookmark, "--revision", "@-"); err != nil {
-				return fmt.Errorf("更新 bookmark %s 失败: %w", bookmark, err)
+			if err := runJJ(report, repoPath, "bookmark", "set", bookmark, "--revision", "@-"); err != nil {
+				wrapped := fmt.Errorf("更新 bookmark %s 失败: %w", bookmark, err)
+				report.Error = wrapped.Error()
+				report.FailureClass = syncFailureClass(wrapped)
+				return report, wrapped
 			}
 		}
-		if err := runJJ(repoPath, "git", "push", "--remote", remote, "--bookmark", bookmark); err != nil {
+		if err := runJJ(report, repoPath, "git", "push", "--remote", remote, "--bookmark", bookmark); err != nil {
 			if capabilityErr := classifyCapabilityMismatch(err, probe, "jj git push --remote "+remote+" --bookmark "+bookmark); capabilityErr != nil {
-				return capabilityErr
+				report.Error = capabilityErr.Error()
+				report.FailureClass = syncFailureClass(capabilityErr)
+				return report, capabilityErr
 			}
 			classified := classifySyncCommandError("push", err)
 			if classified != nil {
@@ -267,23 +369,168 @@ func SyncRepo(repoPath, message string, paths []string, maxRetry int) error {
 				if errors.Is(classified, ErrSyncNetwork) {
 					continue
 				}
-				return classified
+				report.Error = classified.Error()
+				report.FailureClass = syncFailureClass(classified)
+				return report, classified
 			}
 			lastErr = fmt.Errorf("推送远端失败(第 %d/%d 次): %w", attempt, maxRetry, err)
 			lastOp = "push"
 			continue
 		}
-		return nil
+		report.Error = ""
+		report.FailureClass = "ok"
+		return report, nil
 	}
 
 	if lastErr == nil {
 		lastErr = errors.New("未获得可用的推送结果")
 	}
-	return &SyncRetryError{
+	retryErr := &SyncRetryError{
 		Operation: lastOp,
 		Attempts:  maxRetry,
 		Cause:     lastErr,
 	}
+	report.Error = retryErr.Error()
+	report.FailureClass = syncFailureClass(retryErr)
+	return report, retryErr
+}
+
+func finalizeSyncReport(report *SyncReport) {
+	if report == nil {
+		return
+	}
+	report.FinishedAt = time.Now().UTC()
+	report.DurationMS = report.FinishedAt.Sub(report.StartedAt).Milliseconds()
+	if report.DurationMS < 0 {
+		report.DurationMS = 0
+	}
+}
+
+func syncFailureClass(err error) string {
+	switch {
+	case err == nil:
+		return "ok"
+	case errors.Is(err, ErrConflict):
+		return "confirmed_conflict"
+	case errors.Is(err, ErrDirtyWorkingCopy):
+		return "dirty_working_copy"
+	case errors.Is(err, ErrOversizeUntracked):
+		return "oversize_untracked"
+	case errors.Is(err, ErrSyncNetwork):
+		return "network"
+	case errors.Is(err, ErrSyncAuth):
+		return "auth"
+	case errors.Is(err, ErrSyncProtection):
+		return "protection"
+	case errors.Is(err, ErrGitTooOld), errors.Is(err, ErrUnsupportedGit), errors.Is(err, ErrCapabilityMismatch):
+		return "version_mismatch"
+	case errors.Is(err, ErrJJNotAvailable):
+		return "config"
+	default:
+		return "unknown"
+	}
+}
+
+func classifyRebaseFailure(report *SyncReport, repoPath string, rebaseErr error, bookmark, remote string) error {
+	if classified := classifySyncCommandError("rebase", rebaseErr); classified != nil && !errors.Is(classified, ErrSyncUnknown) {
+		return classified
+	}
+
+	conflicted, conflictErr := hasConflicts(report, repoPath)
+	if report != nil {
+		report.ConflictChecked = true
+		report.ConflictFound = conflicted
+	}
+	if conflictErr == nil && conflicted {
+		return &SyncCommandError{
+			Operation: "rebase",
+			Reason:    ErrConflict,
+			Detail:    fmt.Sprintf("%s (已确认 conflicts())", repoPath),
+		}
+	}
+
+	statusOutput, statusErr := runJJOutput(report, repoPath, "st")
+	if report != nil {
+		report.StatusChecked = true
+		report.StatusSummary = summarizeStatusOutput(statusOutput)
+	}
+	if statusErr == nil {
+		switch {
+		case looksLikeRuntimeNoise(statusOutput):
+			return &SyncCommandError{
+				Operation: "rebase",
+				Reason:    ErrOversizeUntracked,
+				Detail:    summarizeStatusOutput(statusOutput),
+			}
+		case hasMeaningfulStatusChanges(statusOutput):
+			return &SyncCommandError{
+				Operation: "rebase",
+				Reason:    ErrDirtyWorkingCopy,
+				Detail:    summarizeStatusOutput(statusOutput),
+			}
+		}
+	}
+
+	detailParts := []string{strings.TrimSpace(rebaseErr.Error())}
+	if conflictErr != nil {
+		detailParts = append(detailParts, "conflicts() 探测失败: "+strings.TrimSpace(conflictErr.Error()))
+	}
+	if statusErr != nil {
+		detailParts = append(detailParts, "jj st 探测失败: "+strings.TrimSpace(statusErr.Error()))
+	} else if strings.TrimSpace(statusOutput) != "" {
+		detailParts = append(detailParts, "jj st: "+summarizeStatusOutput(statusOutput))
+	}
+	return &SyncCommandError{
+		Operation: "rebase",
+		Reason:    ErrSyncUnknown,
+		Detail:    strings.Join(detailParts, "；"),
+	}
+}
+
+func summarizeStatusOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	lines := strings.Split(output, "\n")
+	if len(lines) > 6 {
+		lines = lines[:6]
+	}
+	return strings.Join(lines, " | ")
+}
+
+func hasMeaningfulStatusChanges(output string) bool {
+	text := strings.ToLower(strings.TrimSpace(output))
+	if text == "" {
+		return false
+	}
+	for _, marker := range []string{"no changes", "nothing changed"} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+func looksLikeRuntimeNoise(output string) bool {
+	text := strings.ToLower(strings.TrimSpace(output))
+	if text == "" {
+		return false
+	}
+	for _, marker := range []string{
+		".stream.jsonl",
+		".event.json",
+		".diag.txt",
+		".stdout.txt",
+		"var/results",
+		"var/log",
+		".log",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return containsAnyMarker(text, "oversize", "too large", "large file", "untracked")
 }
 
 func ensureSyncCapabilities() (syncCapabilityProbe, error) {
@@ -310,7 +557,7 @@ func SyncCapabilityStatus() (string, error) {
 }
 
 func probeSyncCapabilities() (syncCapabilityProbe, error) {
-	jjVersion, err := runJJOutput("", "--version")
+	jjVersion, err := runJJOutput(nil, "", "--version")
 	if err != nil {
 		return syncCapabilityProbe{}, fmt.Errorf("读取 jj 版本失败: %w", err)
 	}
@@ -405,7 +652,7 @@ func classifySyncCommandError(operation string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, ErrSyncNetwork) || errors.Is(err, ErrSyncAuth) || errors.Is(err, ErrSyncProtection) || errors.Is(err, ErrSyncUnknown) {
+	if errors.Is(err, ErrConflict) || errors.Is(err, ErrDirtyWorkingCopy) || errors.Is(err, ErrOversizeUntracked) || errors.Is(err, ErrSyncNetwork) || errors.Is(err, ErrSyncAuth) || errors.Is(err, ErrSyncProtection) || errors.Is(err, ErrSyncUnknown) {
 		return err
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
@@ -520,13 +767,13 @@ func versionPart(parts []string, idx int) int {
 	return total
 }
 
-func ensureJJRepo(repoPath string) error {
+func ensureJJRepo(report *SyncReport, repoPath string) error {
 	if _, err := os.Stat(filepath.Join(repoPath, ".jj")); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("读取 .jj 状态失败: %w", err)
 	}
-	if err := runCommand("", "jj", "git", "init", "--colocate", repoPath); err != nil {
+	if err := runCommand(report, "", "jj", "git", "init", "--colocate", repoPath); err != nil {
 		return fmt.Errorf("初始化 jj 仓库失败: %w", err)
 	}
 	return nil
@@ -565,21 +812,21 @@ func normalizePaths(repoPath string, paths []string) ([]string, error) {
 	return items, nil
 }
 
-func trackPaths(repoPath string, paths []string) error {
+func trackPaths(report *SyncReport, repoPath string, paths []string) error {
 	args := []string{"file", "track"}
 	if len(paths) == 0 {
 		args = append(args, ".")
 	} else {
 		args = append(args, paths...)
 	}
-	if err := runJJ(repoPath, args...); err != nil {
+	if err := runJJ(report, repoPath, args...); err != nil {
 		return fmt.Errorf("跟踪仓库路径失败: %w", err)
 	}
 	return nil
 }
 
-func commitChanges(repoPath, message string, paths []string) (bool, error) {
-	changed, err := hasWorkingCopyChanges(repoPath, paths)
+func commitChanges(report *SyncReport, repoPath, message string, paths []string) (bool, error) {
+	changed, err := hasWorkingCopyChanges(report, repoPath, paths)
 	if err != nil {
 		return false, err
 	}
@@ -590,26 +837,26 @@ func commitChanges(repoPath, message string, paths []string) (bool, error) {
 	if len(paths) > 0 {
 		args = append(args, paths...)
 	}
-	if err := runJJ(repoPath, args...); err != nil {
+	if err := runJJ(report, repoPath, args...); err != nil {
 		return false, fmt.Errorf("提交仓库变更失败: %w", err)
 	}
 	return true, nil
 }
 
-func hasWorkingCopyChanges(repoPath string, paths []string) (bool, error) {
+func hasWorkingCopyChanges(report *SyncReport, repoPath string, paths []string) (bool, error) {
 	args := []string{"diff", "--summary"}
 	if len(paths) > 0 {
 		args = append(args, paths...)
 	}
-	output, err := runJJOutput(repoPath, args...)
+	output, err := runJJOutput(report, repoPath, args...)
 	if err != nil {
 		return false, fmt.Errorf("检查仓库变更失败: %w", err)
 	}
 	return strings.TrimSpace(output) != "", nil
 }
 
-func hasConflicts(repoPath string) (bool, error) {
-	output, err := runJJOutput(repoPath, "log", "-r", "conflicts()", "--count", "--no-graph")
+func hasConflicts(report *SyncReport, repoPath string) (bool, error) {
+	output, err := runJJOutput(report, repoPath, "log", "-r", "conflicts()", "--count", "--no-graph")
 	if err != nil {
 		return false, fmt.Errorf("检查 jj 冲突失败: %w", err)
 	}
@@ -637,24 +884,24 @@ func remoteBookmarkExists(repoPath, remote, bookmark string) bool {
 	return err == nil
 }
 
-func runJJ(repoPath string, args ...string) error {
-	return runCommand(repoPath, "jj", args...)
+func runJJ(report *SyncReport, repoPath string, args ...string) error {
+	return runCommand(report, repoPath, "jj", args...)
 }
 
-func runJJOutput(repoPath string, args ...string) (string, error) {
-	return runCommandOutput(repoPath, "jj", args...)
+func runJJOutput(report *SyncReport, repoPath string, args ...string) (string, error) {
+	return runCommandOutput(report, repoPath, "jj", args...)
 }
 
 func runGitOutput(repoPath string, args ...string) (string, error) {
-	return runCommandOutput(repoPath, "git", args...)
+	return runCommandOutput(nil, repoPath, "git", args...)
 }
 
-func runCommand(repoPath, name string, args ...string) error {
-	_, err := runCommandOutput(repoPath, name, args...)
+func runCommand(report *SyncReport, repoPath, name string, args ...string) error {
+	_, err := runCommandOutput(report, repoPath, name, args...)
 	return err
 }
 
-func runCommandOutput(repoPath, name string, args ...string) (string, error) {
+func runCommandOutput(report *SyncReport, repoPath, name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
 	defer cancel()
 
@@ -666,8 +913,43 @@ func runCommandOutput(repoPath, name string, args ...string) (string, error) {
 	if repoPath != "" && name != "jj" {
 		cmd.Dir = repoPath
 	}
-	output, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(output))
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	startedAt := time.Now().UTC()
+	err := cmd.Run()
+	finishedAt := time.Now().UTC()
+
+	exitCode := 0
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = -1
+		}
+	}
+	diag := CommandDiagnostic{
+		Command:    renderCommandLine(name, cmdArgs),
+		ExitCode:   exitCode,
+		Stdout:     strings.TrimSpace(stdout.String()),
+		Stderr:     strings.TrimSpace(stderr.String()),
+		StartedAt:  startedAt,
+		FinishedAt: finishedAt,
+		DurationMS: finishedAt.Sub(startedAt).Milliseconds(),
+	}
+	if repoPath != "" && name != "jj" {
+		diag.WorkDir = repoPath
+	}
+	if diag.DurationMS < 0 {
+		diag.DurationMS = 0
+	}
+	if report != nil {
+		report.Commands = append(report.Commands, diag)
+	}
+
+	text := strings.TrimSpace(strings.Join([]string{diag.Stdout, diag.Stderr}, "\n"))
 	if ctx.Err() == context.DeadlineExceeded {
 		return text, fmt.Errorf("%s %s 执行超时", name, strings.Join(args, " "))
 	}
@@ -678,4 +960,17 @@ func runCommandOutput(repoPath, name string, args ...string) (string, error) {
 		return text, fmt.Errorf("%s %s 执行失败: %s", name, strings.Join(args, " "), text)
 	}
 	return text, nil
+}
+
+func renderCommandLine(name string, args []string) string {
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, name)
+	for _, arg := range args {
+		if strings.ContainsAny(arg, " \t\n\"'") {
+			parts = append(parts, strconv.Quote(arg))
+			continue
+		}
+		parts = append(parts, arg)
+	}
+	return strings.Join(parts, " ")
 }

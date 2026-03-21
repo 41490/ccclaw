@@ -1148,7 +1148,7 @@ $home_repo_step_body
    - $APP_DIR/ops/*
    - shell 集成默认关闭；仅在 --inject-shell bashrc 时写入受控 PATH 块
 8. 安装基础工具：
-   - 必装: git gh rg tmux curl wget golang
+   - 必装: git gh rg tmux curl wget golang jj
    - 能力工具: node npm uv
    - token 优化: rtk
 9. Claude 生态处理：
@@ -1156,18 +1156,24 @@ $home_repo_step_body
    - 不默认追加 marketplace、plugins、example-skills
    - 不默认执行 rtk init --global
    - 执行器默认走: $CLAUDE_WRAPPER
-10. 安装调度后端：
+10. jj / Skill 基线：
+   - 所有本体仓库与任务仓库默认初始化为 `jj git init --colocate`
+   - 若检测到 `origin/HEAD`，自动跟踪默认远端 bookmark
+   - 默认发放受管 Skill: `kb/skills/L1/onevcat-jj/CLAUDE.md`
+   - 后续日常版本管理统一以 `jj` 为本地事实基线
+11. 安装调度后端：
    - 请求模式为 auto|systemd 时先体检 user systemd
    - user systemd 可用时写入 $SYSTEMD_USER_DIR
    - user systemd 不可用时，安装器进入 none + 手工 cron 指引
    - 安装器不再自动写入当前用户 crontab；cron 仅保留为专家手工工具
-11. 任务仓库绑定：
+12. 任务仓库绑定：
    - none: 本轮不绑定
    - remote: clone 到 $TASK_CLONE_ROOT 下约定入口，并写入 config.toml
    - local: 接管已有本地仓库，并写入 config.toml
-12. 升级策略：
+13. 升级策略：
    - upgrade.sh 只升级程序发布树
    - kb/**/CLAUDE.md 采用受管区块刷新，保留用户自定义区块
+   - `onevcat-jj` Skill 会随升级刷新到受管模板最新版本
    - 不自动覆盖本体仓库记忆内容
 
 == 交互项矩阵 ==
@@ -2051,12 +2057,25 @@ init_jj_colocate_repo() {
   [[ -n "$repo_path" ]] || return 0
   if [[ "$SIMULATE" -eq 1 ]]; then
     log "[simulate] jj git init --colocate $repo_path"
+    log "[simulate] track default remote bookmark for $repo_path when origin/HEAD exists"
     return 0
   fi
   [[ -d "$repo_path/.git" ]] || return 0
-  [[ ! -d "$repo_path/.jj" ]] || return 0
-  log "初始化 jj colocated 仓库: $repo_path"
-  jj git init --colocate "$repo_path"
+  if [[ ! -d "$repo_path/.jj" ]]; then
+    log "初始化 jj colocated 仓库: $repo_path"
+    jj git init --colocate "$repo_path"
+  fi
+  track_jj_remote_bookmark "$repo_path"
+}
+
+track_jj_remote_bookmark() {
+  local repo_path="$1" remote_head branch_name
+  [[ -d "$repo_path/.git" ]] || return 0
+  remote_head="$(git -C "$repo_path" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+  [[ -n "$remote_head" ]] || return 0
+  branch_name="${remote_head#origin/}"
+  [[ -n "$branch_name" ]] || return 0
+  jj -R "$repo_path" bookmark track "${branch_name}@origin" >/dev/null 2>&1 || true
 }
 
 preview_home_repo_simulation() {

@@ -119,7 +119,11 @@ func (r *Reporter) ReportFinalizing(task *core.Task, step string, class storage.
 	if client == nil {
 		return nil
 	}
-	body := fmt.Sprintf("任务执行已完成，但交付收尾失败。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 执行结果: `已产出`\n- 当前失败步骤: %s\n- 失败类型: %s\n- 处理策略: %s\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, formatFinalizeStep(step), formatFinalizeFailureClass(class), formatFinalizeFailureMode(mode), strings.TrimSpace(errMsg))
+	finalizeState := "失败"
+	if mode == storage.FinalizeFailureModeRetry {
+		finalizeState = "待复查"
+	}
+	body := fmt.Sprintf("任务执行已完成，但交付收尾未闭环。\n\n- Issue: %s#%d\n- 状态: `%s`\n- 业务执行: `成功`\n- 收尾同步: `%s`\n- 生命周期: `未写回 DONE`\n- 当前失败步骤: %s\n- 失败类型: %s\n- 处理策略: %s\n- 错误: `%s`", task.IssueRepo, task.IssueNumber, core.StateFinalizing, finalizeState, formatFinalizeStep(step), formatFinalizeFailureClass(class), formatFinalizeFailureMode(mode), strings.TrimSpace(errMsg))
 	if len(hints) > 0 {
 		body += "\n\n下一步建议:\n"
 		for _, hint := range hints {

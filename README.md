@@ -519,8 +519,12 @@ bash install.sh
 - 安装前体检 `gh auth`、`systemd --user`、`crontab`、手工 cron 可行性与 remote clone 入口
 - 探查 Claude 官方安装通道可达性
 - 在需要时安装基础系统依赖
+- 若本机缺少 `jj`，自动安装官方预编译版本
 - 安装 `rtk`，并生成 `ccclaude` 包装器
 - 初始化或接管知识仓库
+- 对知识仓库与任务仓库执行 `jj git init --colocate`
+- 若仓库存在 `origin/HEAD`，自动跟踪默认远端 bookmark，确保日常本地版本管理统一走 `jj`
+- 随 release 发放并升级受管 Skill：`kb/skills/L1/onevcat-jj/CLAUDE.md`
 - 优先复用已有 `.env`，并在缺失时回填 `gh auth token`
 - 生成带中文注释的 `config.toml`
 - 安装 `~/.ccclaw/bin/ccclaw`
@@ -731,6 +735,12 @@ CLI 约定：
 3. 再看 `ccclaw scheduler doctor`，确认 linger、user bus、unit 漂移、timer/service 最近状态
 4. 最后按需要选择 `ccclaw scheduler timers --wide|--raw|--json`
 5. 若 doctor 提示 service 异常，再执行 `ccclaw scheduler logs <scope>` 或 `journalctl --user -u <service>`
+
+版本管理基线：
+
+- 安装与升级默认把知识仓库、任务仓库纳入 `jj` colocated 管理
+- 日常本地版本管理统一以 `jj` 为事实基线，Git 主要保留远端兼容面
+- 默认会在知识仓库发放 `kb/skills/L1/onevcat-jj/CLAUDE.md`，供后续操作统一参照
 
 脚本化观测建议：
 

@@ -32,17 +32,18 @@ import (
 )
 
 type Runtime struct {
-	cfg      *config.Config
-	secrets  *config.Secrets
-	store    *storage.Store
-	rep      *reporter.Reporter
-	mem      *memory.Index
-	memRoot  string
-	memCache map[string]*memory.Index
-	ghCache  map[string]*github.Client
-	syncRepo func(repoPath, message string, paths []string, maxRetry int) error
-	log      *logging.Logger
-	logLevel string
+	cfg                *config.Config
+	secrets            *config.Secrets
+	store              *storage.Store
+	rep                *reporter.Reporter
+	mem                *memory.Index
+	memRoot            string
+	memCache           map[string]*memory.Index
+	ghCache            map[string]*github.Client
+	syncRepo           func(repoPath, message string, paths []string, maxRetry int) error
+	syncRepoWithReport func(repoPath, message string, paths []string, maxRetry int) (*vcs.SyncReport, error)
+	log                *logging.Logger
+	logLevel           string
 }
 
 const (
@@ -110,6 +111,17 @@ func (rt *Runtime) repoSync(repoPath, message string, paths []string, maxRetry i
 		return rt.syncRepo(repoPath, message, paths, maxRetry)
 	}
 	return vcs.SyncRepo(repoPath, message, paths, maxRetry)
+}
+
+func (rt *Runtime) repoSyncWithReport(repoPath, message string, paths []string, maxRetry int) (*vcs.SyncReport, error) {
+	if rt != nil && rt.syncRepoWithReport != nil {
+		return rt.syncRepoWithReport(repoPath, message, paths, maxRetry)
+	}
+	if rt != nil && rt.syncRepo != nil {
+		err := rt.syncRepo(repoPath, message, paths, maxRetry)
+		return nil, err
+	}
+	return vcs.SyncRepoWithReport(repoPath, message, paths, maxRetry)
 }
 
 func (rt *Runtime) observedIssueRepos() []string {
@@ -706,6 +718,9 @@ type statusRepoSlotItem struct {
 	ExecutorMode       string `json:"executor_mode,omitempty"`
 	Phase              string `json:"phase"`
 	CurrentStep        string `json:"current_step,omitempty"`
+	ExecutionResult    string `json:"execution_result,omitempty"`
+	FinalizeStatus     string `json:"finalize_status,omitempty"`
+	LifecycleState     string `json:"lifecycle_state,omitempty"`
 	FailureClass       string `json:"failure_class,omitempty"`
 	FailureMode        string `json:"failure_mode,omitempty"`
 	RestartCount       int    `json:"restart_count"`
@@ -721,6 +736,8 @@ type statusRepoSlotItem struct {
 	UpdatedAt          string `json:"updated_at,omitempty"`
 	CompletedAt        string `json:"completed_at,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
+	FinalizeEventFile  string `json:"finalize_event_file,omitempty"`
+	FinalizeDiagFile   string `json:"finalize_diag_file,omitempty"`
 }
 
 type statusRepoSlotSnapshot struct {
@@ -927,6 +944,9 @@ func (rt *Runtime) collectStatusRepoSlots() (statusRepoSlotSnapshot, error) {
 			ExecutorMode:       slot.ExecutorMode,
 			Phase:              phase,
 			CurrentStep:        slot.CurrentStep,
+			ExecutionResult:    "success",
+			FinalizeStatus:     deriveFinalizeStatus(slot),
+			LifecycleState:     deriveFinalizeLifecycleState(slot),
 			FailureClass:       string(slot.FailureClass),
 			FailureMode:        string(slot.FailureMode),
 			RestartCount:       slot.RestartCount,
@@ -942,9 +962,40 @@ func (rt *Runtime) collectStatusRepoSlots() (statusRepoSlotSnapshot, error) {
 			UpdatedAt:          formatRFC3339(slot.UpdatedAt),
 			CompletedAt:        formatRFC3339(slot.CompletedAt),
 			LastError:          slot.LastError,
+			FinalizeEventFile:  slot.FinalizeEventFile,
+			FinalizeDiagFile:   slot.FinalizeDiagFile,
 		})
 	}
 	return snapshot, nil
+}
+
+func deriveFinalizeStatus(slot *storage.RepoSlot) string {
+	if slot == nil {
+		return ""
+	}
+	if slot.SyncTarget == storage.FinalizeStepOK && slot.SyncHome == storage.FinalizeStepOK && slot.ReportIssue == storage.FinalizeStepOK {
+		return "ok"
+	}
+	if slot.FailureMode == storage.FinalizeFailureModeRetry {
+		return "retrying"
+	}
+	if slot.FailureMode == storage.FinalizeFailureModePause {
+		return "failed"
+	}
+	return "pending"
+}
+
+func deriveFinalizeLifecycleState(slot *storage.RepoSlot) string {
+	if slot == nil {
+		return ""
+	}
+	if slot.Phase == storage.RepoSlotPhaseFinalizeFailed {
+		return "pending_done"
+	}
+	if slot.Phase == storage.RepoSlotPhaseFinalizing {
+		return "finalizing"
+	}
+	return string(slot.Phase)
 }
 
 func (rt *Runtime) filterStatusAlerts(events []storage.EventRecord, tasks []*core.Task) []statusAlert {
@@ -1107,7 +1158,7 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 		}
 		_, _ = fmt.Fprintln(out)
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(w, "TARGET\tMODE\tPHASE\tSTEP\tCLASS\tMODE_HINT\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
+		_, _ = fmt.Fprintln(w, "TARGET\tMODE\tPHASE\tSTEP\tEXEC\tFINALIZE\tLIFECYCLE\tCLASS\tMODE_HINT\tRESTART\tFINALIZE_RETRY\tNEXT_RETRY\tTASK\tERROR")
 		for _, item := range snapshot.Slots.Items {
 			nextRetry := item.NextRetryAt
 			if nextRetry == "" {
@@ -1117,11 +1168,14 @@ func renderRuntimeStatusHuman(out io.Writer, snapshot runtimeStatusSnapshot) err
 			if lastError == "" {
 				lastError = "-"
 			}
-			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s:%d\t%s\t%s\t%s\n",
 				item.TargetRepo,
 				emptyStatusValue(item.ExecutorMode),
 				item.Phase,
 				emptyStatusValue(item.CurrentStep),
+				emptyStatusValue(item.ExecutionResult),
+				emptyStatusValue(item.FinalizeStatus),
+				emptyStatusValue(item.LifecycleState),
 				emptyStatusValue(item.FailureClass),
 				emptyStatusValue(item.FailureMode),
 				item.RestartCount,

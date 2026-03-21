@@ -70,6 +70,63 @@ func TestSyncRepoStopsOnConflict(t *testing.T) {
 	}
 }
 
+func TestSyncRepoDoesNotClassifyEmptyConflictsAsConflict(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	if err := os.MkdirAll(filepath.Join(repoPath, ".jj"), 0o755); err != nil {
+		t.Fatalf("创建 .jj 失败: %v", err)
+	}
+	if output, err := runGitOutput(repoPath, "update-ref", "refs/remotes/origin/main", "HEAD"); err != nil {
+		t.Fatalf("准备 origin/main 失败: %v (%s)", err, output)
+	}
+	logFile, committedFile := prepareFakeJJ(t)
+	prepareGitVersionShim(t, "git version 2.42.0")
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_REBASE_ERROR_TEXT", "working copy changed during rebase")
+	t.Setenv("JJ_STATUS_TEXT", "Working copy changes:\nM README.md\n")
+
+	report, err := SyncRepoWithReport(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrDirtyWorkingCopy) {
+		t.Fatalf("expected dirty-working-copy error, got %v", err)
+	}
+	if errors.Is(err, ErrConflict) {
+		t.Fatalf("empty conflicts() must not be classified as conflict: %v", err)
+	}
+	if report == nil || report.FailureClass != "dirty_working_copy" || !report.ConflictChecked || !report.StatusChecked {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+	commands := readCommands(t, logFile)
+	for _, want := range []string{"rebase -d main@origin", "log -r conflicts() --count --no-graph", "st"} {
+		if !containsCommand(commands, want) {
+			t.Fatalf("expected command %q, got %#v", want, commands)
+		}
+	}
+}
+
+func TestSyncRepoClassifiesRuntimeNoiseAsOversizeUntracked(t *testing.T) {
+	repoPath := initGitRepo(t, true)
+	if err := os.MkdirAll(filepath.Join(repoPath, ".jj"), 0o755); err != nil {
+		t.Fatalf("创建 .jj 失败: %v", err)
+	}
+	if output, err := runGitOutput(repoPath, "update-ref", "refs/remotes/origin/main", "HEAD"); err != nil {
+		t.Fatalf("准备 origin/main 失败: %v (%s)", err, output)
+	}
+	logFile, committedFile := prepareFakeJJ(t)
+	prepareGitVersionShim(t, "git version 2.42.0")
+	t.Setenv("JJ_LOG_FILE", logFile)
+	t.Setenv("JJ_COMMITTED_FILE", committedFile)
+	t.Setenv("JJ_REBASE_ERROR_TEXT", "snapshot too large")
+	t.Setenv("JJ_STATUS_TEXT", "Working copy changes:\nA var/results/95_body.stream.jsonl\n")
+
+	report, err := SyncRepoWithReport(repoPath, "task done", nil, 3)
+	if err == nil || !errors.Is(err, ErrOversizeUntracked) {
+		t.Fatalf("expected oversize-untracked error, got %v", err)
+	}
+	if report == nil || report.FailureClass != "oversize_untracked" {
+		t.Fatalf("unexpected report: %#v", report)
+	}
+}
+
 func TestSyncRepoWithoutRemoteOnlyCommitsLocalChanges(t *testing.T) {
 	repoPath := initGitRepo(t, false)
 	logFile, committedFile := prepareFakeJJ(t)
@@ -339,6 +396,19 @@ case "${1:-}" in
       printf '1\n'
     else
       printf '0\n'
+    fi
+    ;;
+  st)
+    if [[ -n "${JJ_STATUS_TEXT:-}" ]]; then
+      printf '%s' "${JJ_STATUS_TEXT}"
+    else
+      printf 'The working copy has no changes.\n'
+    fi
+    ;;
+  rebase)
+    if [[ -n "${JJ_REBASE_ERROR_TEXT:-}" ]]; then
+      printf '%s\n' "${JJ_REBASE_ERROR_TEXT}" >&2
+      exit 1
     fi
     ;;
   commit)

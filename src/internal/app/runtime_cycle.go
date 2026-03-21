@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,6 +26,33 @@ const (
 	finalizeRetryMaxDelay    = 1 * time.Hour
 	maxFinalizeRetry         = 4
 )
+
+type finalizeSyncOutcome struct {
+	state  storage.FinalizeStepState
+	hints  []string
+	report *vcs.SyncReport
+	err    error
+}
+
+type finalizeDiagnosticEnvelope struct {
+	TaskID     string                    `json:"task_id"`
+	IssueRef   string                    `json:"issue_ref"`
+	TargetRepo string                    `json:"target_repo,omitempty"`
+	Events     []finalizeDiagnosticEvent `json:"events"`
+}
+
+type finalizeDiagnosticEvent struct {
+	RecordedAt      time.Time       `json:"recorded_at"`
+	Step            string          `json:"step"`
+	StepState       string          `json:"step_state,omitempty"`
+	FailureClass    string          `json:"failure_class,omitempty"`
+	FailureMode     string          `json:"failure_mode,omitempty"`
+	ExecutionResult string          `json:"execution_result,omitempty"`
+	LifecycleState  string          `json:"lifecycle_state,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	Hints           []string        `json:"hints,omitempty"`
+	Sync            *vcs.SyncReport `json:"sync,omitempty"`
+}
 
 func (rt *Runtime) runIngestCycle(ctx context.Context, out io.Writer, dispatchOnly bool) error {
 	advancedCount, err := rt.advanceRepoSlots(ctx)
@@ -579,19 +608,25 @@ func (rt *Runtime) runFinalizeSteps(ctx context.Context, task *core.Task, result
 	}
 	if slot.SyncTarget != storage.FinalizeStepOK {
 		prepareFinalizeAttempt(slot, "sync_target")
-		state, hints, err := rt.syncFinalizeTarget(task)
-		slot.SyncTarget = state
-		if err != nil {
-			return rt.handleFinalizeFailure(task, slot, "target", err, hints)
+		outcome := rt.syncFinalizeTarget(task)
+		slot.SyncTarget = outcome.state
+		if err := rt.recordFinalizeSyncAttempt(task, slot, "sync_target", outcome); err != nil {
+			return err
+		}
+		if outcome.err != nil {
+			return rt.handleFinalizeFailure(task, slot, "target", outcome.err, outcome.hints)
 		}
 		markFinalizeStepDone(slot, "sync_target")
 	}
 	if slot.SyncHome != storage.FinalizeStepOK {
 		prepareFinalizeAttempt(slot, "sync_home")
-		state, hints, err := rt.syncFinalizeHome(task)
-		slot.SyncHome = state
-		if err != nil {
-			return rt.handleFinalizeFailure(task, slot, "home", err, hints)
+		outcome := rt.syncFinalizeHome(task)
+		slot.SyncHome = outcome.state
+		if err := rt.recordFinalizeSyncAttempt(task, slot, "sync_home", outcome); err != nil {
+			return err
+		}
+		if outcome.err != nil {
+			return rt.handleFinalizeFailure(task, slot, "home", outcome.err, outcome.hints)
 		}
 		markFinalizeStepDone(slot, "sync_home")
 	}
@@ -609,6 +644,12 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 	slot.FailureClass = assessment.class
 	slot.FailureMode = assessment.policy.mode
 	slot.Hints = append([]string(nil), hints...)
+	if strings.TrimSpace(slot.FinalizeEventFile) != "" {
+		slot.Hints = append(slot.Hints, fmt.Sprintf("结构化诊断: `%s`", slot.FinalizeEventFile))
+	}
+	if strings.TrimSpace(slot.FinalizeDiagFile) != "" {
+		slot.Hints = append(slot.Hints, fmt.Sprintf("文本诊断: `%s`", slot.FinalizeDiagFile))
+	}
 	slot.LastAttemptAt = now
 	stepName := finalizeStepName(step)
 	slot.LastFailureStep = stepName
@@ -625,6 +666,9 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 		slot.FailureMode = policy.mode
 	}
 	slot.NextRetryAt = now.Add(policy.nextDelay(slot.FinalizeRetryCount))
+	if shouldShortRecheckFinalizeFailure(step, assessment.class, err) {
+		slot.Hints = append(slot.Hints, "当前未确认真实冲突；系统将先执行短间隔复查，再决定是否需要人工介入")
+	}
 	switch policy.mode {
 	case storage.FinalizeFailureModeRetry:
 		slot.Hints = append(slot.Hints,
@@ -658,37 +702,134 @@ func (rt *Runtime) handleFinalizeFailure(task *core.Task, slot *storage.RepoSlot
 	return nil
 }
 
-func (rt *Runtime) syncFinalizeTarget(task *core.Task) (storage.FinalizeStepState, []string, error) {
+func (rt *Runtime) syncFinalizeTarget(task *core.Task) finalizeSyncOutcome {
 	if task == nil || strings.TrimSpace(task.TargetRepo) == "" {
-		return storage.FinalizeStepOK, nil, nil
+		return finalizeSyncOutcome{state: storage.FinalizeStepOK}
 	}
 	target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
 	if err != nil {
-		return storage.FinalizeStepFailed, []string{fmt.Sprintf("请检查目标仓配置: %v", err)}, err
+		return finalizeSyncOutcome{
+			state: storage.FinalizeStepFailed,
+			hints: []string{fmt.Sprintf("请检查目标仓配置: %v", err)},
+			err:   err,
+		}
 	}
-	err = rt.repoSync(target.LocalPath, fmt.Sprintf("task done: %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3)
+	report, err := rt.repoSyncWithReport(target.LocalPath, fmt.Sprintf("task done: %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3)
 	if err == nil {
-		return storage.FinalizeStepOK, nil, nil
+		return finalizeSyncOutcome{state: storage.FinalizeStepOK, report: report}
 	}
 	class := classifyFinalizeFailureClass("target", err)
-	return finalizeFailureState(err), buildFinalizeHints(task.TargetRepo, target.LocalPath, err, class), err
+	return finalizeSyncOutcome{
+		state:  finalizeFailureState(err),
+		hints:  buildFinalizeHints(task.TargetRepo, target.LocalPath, err, class),
+		report: report,
+		err:    err,
+	}
 }
 
-func (rt *Runtime) syncFinalizeHome(task *core.Task) (storage.FinalizeStepState, []string, error) {
+func (rt *Runtime) syncFinalizeHome(task *core.Task) finalizeSyncOutcome {
 	homeRepo := strings.TrimSpace(rt.cfg.Paths.HomeRepo)
 	if homeRepo == "" {
-		return storage.FinalizeStepOK, nil, nil
+		return finalizeSyncOutcome{state: storage.FinalizeStepOK}
 	}
 	target, err := rt.cfg.EnabledTargetByRepo(task.TargetRepo)
 	if err == nil && target != nil && filepath.Clean(target.LocalPath) == filepath.Clean(homeRepo) {
-		return storage.FinalizeStepOK, nil, nil
+		return finalizeSyncOutcome{state: storage.FinalizeStepOK}
 	}
-	err = rt.repoSync(homeRepo, fmt.Sprintf("task done(home): %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3)
+	report, err := rt.repoSyncWithReport(homeRepo, fmt.Sprintf("task done(home): %s#%d %s", task.IssueRepo, task.IssueNumber, task.IssueTitle), nil, 3)
 	if err == nil {
-		return storage.FinalizeStepOK, nil, nil
+		return finalizeSyncOutcome{state: storage.FinalizeStepOK, report: report}
 	}
 	class := classifyFinalizeFailureClass("home", err)
-	return finalizeFailureState(err), buildFinalizeHints("知识仓库", homeRepo, err, class), err
+	return finalizeSyncOutcome{
+		state:  finalizeFailureState(err),
+		hints:  buildFinalizeHints("知识仓库", homeRepo, err, class),
+		report: report,
+		err:    err,
+	}
+}
+
+func (rt *Runtime) recordFinalizeSyncAttempt(task *core.Task, slot *storage.RepoSlot, step string, outcome finalizeSyncOutcome) error {
+	if rt == nil || task == nil || slot == nil || outcome.report == nil {
+		return nil
+	}
+	eventPath, diagPath := rt.finalizeDiagnosticPaths(task.TaskID)
+	slot.FinalizeEventFile = eventPath
+	slot.FinalizeDiagFile = diagPath
+
+	if err := os.MkdirAll(filepath.Dir(eventPath), 0o755); err != nil {
+		return fmt.Errorf("创建 finalize 诊断目录失败: %w", err)
+	}
+
+	envelope := finalizeDiagnosticEnvelope{
+		TaskID:     task.TaskID,
+		IssueRef:   rt.issueRef(task.IssueRepo, task.IssueNumber),
+		TargetRepo: task.TargetRepo,
+	}
+	if payload, err := os.ReadFile(eventPath); err == nil && len(payload) > 0 {
+		_ = json.Unmarshal(payload, &envelope)
+	}
+	envelope.Events = append(envelope.Events, finalizeDiagnosticEvent{
+		RecordedAt:      time.Now().UTC(),
+		Step:            step,
+		StepState:       string(outcome.state),
+		FailureClass:    string(classifyFinalizeFailureClass(step, outcome.err)),
+		ExecutionResult: "success",
+		LifecycleState:  deriveFinalizeLifecycleState(slot),
+		Error:           strings.TrimSpace(errorText(outcome.err)),
+		Hints:           append([]string(nil), outcome.hints...),
+		Sync:            outcome.report,
+	})
+	encoded, err := json.MarshalIndent(envelope, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化 finalize 诊断失败: %w", err)
+	}
+	if err := os.WriteFile(eventPath, encoded, 0o644); err != nil {
+		return fmt.Errorf("写入 finalize 诊断失败: %w", err)
+	}
+
+	var summary strings.Builder
+	summary.WriteString(fmt.Sprintf("[%s] %s\n", time.Now().UTC().Format(time.RFC3339), step))
+	summary.WriteString(fmt.Sprintf("step_state=%s\n", outcome.state))
+	summary.WriteString(fmt.Sprintf("failure_class=%s\n", classifyFinalizeFailureClass(step, outcome.err)))
+	if outcome.err != nil {
+		summary.WriteString(fmt.Sprintf("error=%s\n", strings.TrimSpace(outcome.err.Error())))
+	}
+	for _, cmd := range outcome.report.Commands {
+		summary.WriteString("\n$ " + cmd.Command + "\n")
+		if cmd.WorkDir != "" {
+			summary.WriteString("workdir: " + cmd.WorkDir + "\n")
+		}
+		summary.WriteString(fmt.Sprintf("exit=%d duration_ms=%d\n", cmd.ExitCode, cmd.DurationMS))
+		if strings.TrimSpace(cmd.Stdout) != "" {
+			summary.WriteString("stdout:\n" + cmd.Stdout + "\n")
+		}
+		if strings.TrimSpace(cmd.Stderr) != "" {
+			summary.WriteString("stderr:\n" + cmd.Stderr + "\n")
+		}
+	}
+	handle, err := os.OpenFile(diagPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("打开 finalize 文本诊断失败: %w", err)
+	}
+	defer handle.Close()
+	if _, err := handle.WriteString(summary.String() + "\n"); err != nil {
+		return fmt.Errorf("写入 finalize 文本诊断失败: %w", err)
+	}
+	return rt.store.UpsertRepoSlot(slot)
+}
+
+func (rt *Runtime) finalizeDiagnosticPaths(taskID string) (string, string) {
+	safe := strings.NewReplacer("#", "_", "/", "_", ":", "_", ".", "_", " ", "_").Replace(strings.TrimSpace(taskID))
+	base := filepath.Join(rt.cfg.Paths.VarDir, "results", safe)
+	return base + ".finalize.event.json", base + ".finalize.diag.txt"
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func finalizeFailureState(err error) storage.FinalizeStepState {
@@ -725,6 +866,17 @@ func buildFinalizeHints(repo, localPath string, err error, class storage.Finaliz
 			"若涉及同一区域并发修改，请在 GitHub 仓库的 `Pull requests` 查看是否已有相关改动待合并",
 			"本地收敛后可执行 `jj resolve`，再执行 `jj git push --remote origin --bookmark main`",
 		)
+	case storage.FinalizeFailureClassDirtyWorkingCopy:
+		hints = append(hints,
+			"当前未确认真实 `conflicts()`；请先执行 `jj st` 核对是否有本地脏工作区",
+			"若只是运行态或临时文件噪音，请先清理或补 `.gitignore/.jjignore`，再观察系统短复查是否自动恢复",
+			"若确有人工未提交改动，请先收敛工作区后再继续同步",
+		)
+	case storage.FinalizeFailureClassOversizeUntracked:
+		hints = append(hints,
+			"检测到运行态未跟踪产物噪音；请优先清理 `var/results`、日志或大文件缓存，再观察短复查是否恢复",
+			"建议把稳定的运行态噪音路径补入忽略规则，避免每次 FINALIZING 都被 `jj st` 污染",
+		)
 	case storage.FinalizeFailureClassProtection:
 		hints = append(hints,
 			"请在 GitHub 仓库的 `Settings -> Branches` 检查默认分支保护规则",
@@ -744,8 +896,8 @@ func buildFinalizeHints(repo, localPath string, err error, class storage.Finaliz
 		)
 	default:
 		hints = append(hints,
-			"建议先手工执行 `jj git fetch --remote origin` 与 `jj git push --remote origin --bookmark main` 复现原始报错",
-			"若仍无法归类，请把完整 stderr 写回工程报告与 Issue，避免只保留摘要错误",
+			"建议先手工执行 `jj git fetch --remote origin`、`jj rebase -d main@origin` 与 `jj st` 复现原始报错",
+			"当前证据不足以确认真实冲突；请优先查看 finalize 诊断文件，而不是直接执行 `jj resolve`",
 		)
 	}
 	if repo != "" && repo != "知识仓库" {
@@ -1196,13 +1348,26 @@ func (p finalizeFailurePolicy) nextDelay(retryCount int) time.Duration {
 }
 
 func assessFinalizeFailure(step string, err error) finalizeFailureAssessment {
+	class := classifyFinalizeFailureClass(step, err)
 	policy := finalizeFailurePolicy{mode: storage.FinalizeFailureModePause, delay: finalizeRetryManualDelay}
-	if isTransientFinalizeError(err) {
+	if isTransientFinalizeError(err) || shouldShortRecheckFinalizeFailure(step, class, err) {
 		policy = finalizeFailurePolicy{mode: storage.FinalizeFailureModeRetry, delay: finalizeRetryBaseDelay}
 	}
 	return finalizeFailureAssessment{
-		class:  classifyFinalizeFailureClass(step, err),
+		class:  class,
 		policy: policy,
+	}
+}
+
+func shouldShortRecheckFinalizeFailure(step string, class storage.FinalizeFailureClass, err error) bool {
+	if finalizeStepName(step) != "sync_home" || err == nil {
+		return false
+	}
+	switch class {
+	case storage.FinalizeFailureClassUnknown, storage.FinalizeFailureClassDirtyWorkingCopy, storage.FinalizeFailureClassOversizeUntracked:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1215,6 +1380,12 @@ func classifyFinalizeFailureClass(step string, err error) storage.FinalizeFailur
 	}
 	if errors.Is(err, vcs.ErrConflict) {
 		return storage.FinalizeFailureClassConflict
+	}
+	if errors.Is(err, vcs.ErrDirtyWorkingCopy) {
+		return storage.FinalizeFailureClassDirtyWorkingCopy
+	}
+	if errors.Is(err, vcs.ErrOversizeUntracked) {
+		return storage.FinalizeFailureClassOversizeUntracked
 	}
 	if errors.Is(err, vcs.ErrGitTooOld) || errors.Is(err, vcs.ErrUnsupportedGit) || errors.Is(err, vcs.ErrCapabilityMismatch) {
 		return storage.FinalizeFailureClassVersionMismatch
@@ -1235,6 +1406,27 @@ func classifyFinalizeFailureClass(step string, err error) storage.FinalizeFailur
 		return storage.FinalizeFailureClassConfig
 	}
 	text := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"工作区存在本地变更",
+		"dirty working copy",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassDirtyWorkingCopy
+		}
+	}
+	for _, marker := range []string{
+		"未跟踪产物噪音",
+		"oversize",
+		"large file",
+		"var/results",
+		".stream.jsonl",
+		".event.json",
+		".diag.txt",
+	} {
+		if strings.Contains(text, marker) {
+			return storage.FinalizeFailureClassOversizeUntracked
+		}
+	}
 	for _, marker := range []string{
 		"supported version is",
 		"git 版本过低",
@@ -1316,6 +1508,9 @@ func isTransientFinalizeError(err error) bool {
 	}
 	if errors.Is(err, vcs.ErrSyncNetwork) {
 		return true
+	}
+	if errors.Is(err, vcs.ErrDirtyWorkingCopy) || errors.Is(err, vcs.ErrOversizeUntracked) {
+		return false
 	}
 	if errors.Is(err, vcs.ErrConflict) || errors.Is(err, vcs.ErrJJNotAvailable) || errors.Is(err, vcs.ErrGitTooOld) || errors.Is(err, vcs.ErrUnsupportedGit) || errors.Is(err, vcs.ErrCapabilityMismatch) {
 		return false

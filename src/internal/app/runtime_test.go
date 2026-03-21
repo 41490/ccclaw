@@ -1493,8 +1493,10 @@ printf '{}\n'
 		t.Fatalf("首轮 finalize_failed 应回帖一次，实际日志=%q", logText)
 	}
 	for _, want := range []string{
-		"任务执行已完成，但交付收尾失败。",
-		"执行结果: `已产出`",
+		"任务执行已完成，但交付收尾未闭环。",
+		"业务执行: `成功`",
+		"收尾同步: `待复查`",
+		"生命周期: `未写回 DONE`",
 		"当前失败步骤: `sync_target`",
 		"失败类型: `network`",
 		"处理策略: `retry`",
@@ -1624,7 +1626,7 @@ printf '{"id":701}
 		t.Fatalf("预期两次 issue 评论调用，实际为 %q", logText)
 	}
 	readyIdx := strings.Index(logText, "任务执行结果已形成，正在执行交付收尾。")
-	failIdx := strings.Index(logText, "任务执行已完成，但交付收尾失败。")
+	failIdx := strings.Index(logText, "任务执行已完成，但交付收尾未闭环。")
 	if readyIdx < 0 || failIdx < 0 || readyIdx >= failIdx {
 		t.Fatalf("预期先发可见回帖再发失败说明，实际为 %q", logText)
 	}
@@ -1750,6 +1752,97 @@ printf '{"id":701}
 	}
 }
 
+func TestCompleteTaskFinalizingWritesFinalizeDiagnosticsOnFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "bin")
+	if err := os.MkdirAll(fakeBin, 0o755); err != nil {
+		t.Fatalf("创建 fake bin 失败: %v", err)
+	}
+	logPath := filepath.Join(tmpDir, "gh.log")
+	scriptPath := filepath.Join(fakeBin, "gh")
+	script := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s
+' "$*" >> "$CCCLAW_REPORTER_LOG"
+printf '{"id":701}
+'`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("写入 fake gh 失败: %v", err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+oldPath)
+	t.Setenv("CCCLAW_REPORTER_LOG", logPath)
+
+	varDir := filepath.Join(tmpDir, "var")
+	store, err := storage.Open(varDir)
+	if err != nil {
+		t.Fatalf("打开 store 失败: %v", err)
+	}
+	defer store.Close()
+
+	task := &core.Task{
+		TaskID:         core.TaskID("41490/ccclaw", 96),
+		IdempotencyKey: core.IdempotencyKey("41490/ccclaw", 96),
+		ControlRepo:    "41490/ccclaw",
+		IssueRepo:      "41490/ccclaw",
+		TargetRepo:     "41490/ccclaw",
+		IssueNumber:    96,
+		IssueTitle:     "finalize diagnostics",
+		State:          core.StateRunning,
+	}
+	if err := store.UpsertTask(task); err != nil {
+		t.Fatalf("写入任务失败: %v", err)
+	}
+
+	rt := &Runtime{
+		cfg: &config.Config{
+			GitHub: config.GitHubConfig{ControlRepo: "41490/ccclaw"},
+			Paths:  config.PathsConfig{VarDir: varDir, KBDir: "/opt/ccclaw/kb", HomeRepo: filepath.Join(tmpDir, "home")},
+			Targets: []config.TargetConfig{{
+				Repo:      "41490/ccclaw",
+				LocalPath: filepath.Join(tmpDir, "target"),
+				KBPath:    "/opt/ccclaw/kb",
+			}},
+		},
+		store: store,
+		rep: reporter.New(func(repo string) *github.Client {
+			return github.NewClient(repo, map[string]string{})
+		}),
+		syncRepoWithReport: func(repoPath, message string, paths []string, maxRetry int) (*vcs.SyncReport, error) {
+			return &vcs.SyncReport{
+				RepoPath:     repoPath,
+				FailureClass: "dirty_working_copy",
+				Commands: []vcs.CommandDiagnostic{{
+					Command:    "jj -R /tmp/target rebase -d main@origin",
+					ExitCode:   1,
+					Stderr:     "working copy changed",
+					StartedAt:  time.Now().UTC(),
+					FinishedAt: time.Now().UTC(),
+				}},
+			}, vcs.ErrDirtyWorkingCopy
+		},
+	}
+
+	result := &executor.Result{Duration: 5 * time.Second, LogFile: "/tmp/task.log"}
+	if err := rt.completeTaskFinalizing(context.Background(), task, result, nil); err != nil {
+		t.Fatalf("completeTaskFinalizing 失败: %v", err)
+	}
+
+	slot, err := store.GetRepoSlot(task.TargetRepo)
+	if err != nil {
+		t.Fatalf("读取仓位失败: %v", err)
+	}
+	if slot == nil || slot.FinalizeEventFile == "" || slot.FinalizeDiagFile == "" {
+		t.Fatalf("expected finalize diagnostic paths, got %#v", slot)
+	}
+	if _, err := os.Stat(slot.FinalizeEventFile); err != nil {
+		t.Fatalf("missing finalize event file: %v", err)
+	}
+	if _, err := os.Stat(slot.FinalizeDiagFile); err != nil {
+		t.Fatalf("missing finalize diag file: %v", err)
+	}
+}
+
 func TestAssessFinalizeFailureVersionMismatchReturnsPause(t *testing.T) {
 	err := fmt.Errorf("%w: 当前 git=git version 2.39.5，jj=jj 0.39.0；请升级 git 至 2.41.0 及以上，或切换匹配的 jj 版本", vcs.ErrGitTooOld)
 	assessment := assessFinalizeFailure("target", err)
@@ -1775,6 +1868,16 @@ func TestAssessFinalizeFailureCapabilityMismatchReturnsPause(t *testing.T) {
 	}
 	if assessment.policy.mode != storage.FinalizeFailureModePause {
 		t.Fatalf("expected pause policy, got %+v", assessment.policy)
+	}
+}
+
+func TestAssessFinalizeFailureSyncHomeDirtyWorkingCopyReturnsRetry(t *testing.T) {
+	assessment := assessFinalizeFailure("home", vcs.ErrDirtyWorkingCopy)
+	if assessment.class != storage.FinalizeFailureClassDirtyWorkingCopy {
+		t.Fatalf("expected dirty_working_copy, got %s", assessment.class)
+	}
+	if assessment.policy.mode != storage.FinalizeFailureModeRetry {
+		t.Fatalf("expected retry policy, got %+v", assessment.policy)
 	}
 }
 

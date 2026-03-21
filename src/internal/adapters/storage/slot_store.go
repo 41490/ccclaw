@@ -35,14 +35,16 @@ const (
 type FinalizeFailureClass string
 
 const (
-	FinalizeFailureClassUnknown         FinalizeFailureClass = "unknown"
-	FinalizeFailureClassNetwork         FinalizeFailureClass = "network"
-	FinalizeFailureClassConflict        FinalizeFailureClass = "conflict"
-	FinalizeFailureClassAuth            FinalizeFailureClass = "auth"
-	FinalizeFailureClassProtection      FinalizeFailureClass = "protection"
-	FinalizeFailureClassVersionMismatch FinalizeFailureClass = "version_mismatch"
-	FinalizeFailureClassConfig          FinalizeFailureClass = "config"
-	FinalizeFailureClassIssueReporting  FinalizeFailureClass = "issue_reporting"
+	FinalizeFailureClassUnknown           FinalizeFailureClass = "unknown"
+	FinalizeFailureClassNetwork           FinalizeFailureClass = "network"
+	FinalizeFailureClassConflict          FinalizeFailureClass = "conflict"
+	FinalizeFailureClassDirtyWorkingCopy  FinalizeFailureClass = "dirty_working_copy"
+	FinalizeFailureClassOversizeUntracked FinalizeFailureClass = "oversize_untracked"
+	FinalizeFailureClassAuth              FinalizeFailureClass = "auth"
+	FinalizeFailureClassProtection        FinalizeFailureClass = "protection"
+	FinalizeFailureClassVersionMismatch   FinalizeFailureClass = "version_mismatch"
+	FinalizeFailureClassConfig            FinalizeFailureClass = "config"
+	FinalizeFailureClassIssueReporting    FinalizeFailureClass = "issue_reporting"
 )
 
 func (c FinalizeFailureClass) Display() string {
@@ -51,6 +53,10 @@ func (c FinalizeFailureClass) Display() string {
 		return "网络抖动"
 	case FinalizeFailureClassConflict:
 		return "仓库冲突"
+	case FinalizeFailureClassDirtyWorkingCopy:
+		return "工作区脏变更"
+	case FinalizeFailureClassOversizeUntracked:
+		return "运行态未跟踪噪音"
 	case FinalizeFailureClassAuth:
 		return "认证或权限"
 	case FinalizeFailureClassProtection:
@@ -101,6 +107,8 @@ type RepoSlot struct {
 	FailureClass        FinalizeFailureClass `json:"failure_class,omitempty"`
 	FailureMode         FinalizeFailureMode  `json:"failure_mode,omitempty"`
 	LastError           string               `json:"last_error,omitempty"`
+	FinalizeEventFile   string               `json:"finalize_event_file,omitempty"`
+	FinalizeDiagFile    string               `json:"finalize_diag_file,omitempty"`
 	Hints               []string             `json:"hints,omitempty"`
 	LastProbeAt         time.Time            `json:"last_probe_at,omitempty"`
 	LastAttemptAt       time.Time            `json:"last_attempt_at,omitempty"`

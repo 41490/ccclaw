@@ -34,6 +34,7 @@
 - `~/.claude/.credentials.json`
 - 已安装 plugins / marketplaces
 - `gh` / `rg` / `rtk` / `git` / `node` / `npm` / `uv`
+- `jj`
 - `gh auth status` / `gh auth token`
 - `systemctl --user` 与 `~/.config/systemd/user` 可用性
 
@@ -45,9 +46,14 @@
 - `control_repo` 固定为 `41490/ccclaw`，不再交互询问
 - 不默认补装 plugins / marketplace / `example-skills`
 - 若缺少 `rtk`：优先按官方 quick install 安装
+- 若缺少 `jj`：优先安装官方预编译版本
 - 不默认执行 `rtk init --global`
 - 知识仓库默认 `init` 到 `/opt/ccclaw`，也允许 clone 远程仓库或接管本地仓库
 - 任务仓库默认不绑定；若指定远程仓库，则 clone 到 `/opt/src/3claw/owner/repo`
+- 知识仓库与任务仓库默认执行 `jj git init --colocate`
+- 若存在 `origin/HEAD`，自动跟踪默认远端 bookmark
+- 默认发放受管 Skill：`kb/skills/L1/onevcat-jj/CLAUDE.md`
+- 后续日常本地版本管理统一以 `jj` 为事实基线
 - 若 `gh` 已登录，则优先复用 `gh auth token` 写入 `.env`
 - 若 `systemd --user` 不可用，默认继续安装为 `none + 手工 cron 指引`，不自动托管 `cron`
 - 升级只覆盖程序树，不覆盖知识仓库
